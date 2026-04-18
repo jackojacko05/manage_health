@@ -24,7 +24,7 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { queryDatabase, createPage, P, getPropText, NotionPage } from './notion-api';
+import { queryDatabase, createPage, updatePage, P, getPropText, NotionPage } from './notion-api';
 import type { DailyMeals, FoodEntry, MealSummary } from './types';
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -125,14 +125,25 @@ async function main() {
     });
     let healthLogPage: NotionPage;
     if (existingHealthLogs.length === 0) {
-      healthLogPage = await createPage(token, DB.healthLog, {
+      const props: Record<string, unknown> = {
         日付: P.title(dateStr),
         記録日: P.date(dateStr),
-      });
+      };
+      if (input.dailyAdvice) {
+        props['食事アドバイス'] = P.richText(input.dailyAdvice);
+      }
+      healthLogPage = await createPage(token, DB.healthLog, props);
       console.error(`[sync-notion] Created 健康ログ for ${dateStr}`);
     } else {
       healthLogPage = existingHealthLogs[0];
       console.error(`[sync-notion] 健康ログ exists for ${dateStr}`);
+      // dailyAdvice は毎回上書き（健康ログは append-only 対象外の日次レコード）
+      if (input.dailyAdvice) {
+        await updatePage(token, healthLogPage.id, {
+          食事アドバイス: P.richText(input.dailyAdvice),
+        });
+        console.error(`[sync-notion] Updated 食事アドバイス on 健康ログ`);
+      }
     }
 
     // ---- 2. 食事記録: 当日の既存ハッシュSet ----
@@ -178,7 +189,7 @@ async function main() {
       const h = mealHash(meal);
       if (existingMealHashes.has(h)) continue;
       const title = `${dateStr} ${nowJstHHmm()} ${meal.division}`;
-      await createPage(token, DB.mealSummary, {
+      const mealProps: Record<string, unknown> = {
         エントリID: P.title(title),
         更新時刻: P.date(nowJstIso()),
         食事区分: P.select(meal.division),
@@ -189,7 +200,11 @@ async function main() {
         食物繊維: P.number(meal.fiber),
         ハッシュ: P.richText(h),
         日付: P.relation([healthLogPage.id]),
-      });
+      };
+      if (meal.advice) {
+        mealProps['アドバイス'] = P.richText(meal.advice);
+      }
+      await createPage(token, DB.mealSummary, mealProps);
       mealsCreated++;
       console.error(
         `[sync-notion]  + 食事サマリ: ${meal.division} ${meal.calories}kcal P${meal.protein}/F${meal.fat}/C${meal.carbs}`

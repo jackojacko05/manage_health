@@ -74,6 +74,22 @@ export async function createPage(
   return (await res.json()) as NotionPage;
 }
 
+export async function updatePage(
+  token: string,
+  pageId: string,
+  properties: Record<string, any>
+): Promise<NotionPage> {
+  const res = await fetch(`${NOTION_API}/pages/${pageId}`, {
+    method: 'PATCH',
+    headers: headers(token),
+    body: JSON.stringify({ properties }),
+  });
+  if (!res.ok) {
+    throw new Error(`Notion update failed: ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as NotionPage;
+}
+
 // ---- Property builders (typed shortcuts) ----
 export const P = {
   title: (text: string) => ({ title: [{ type: 'text', text: { content: text } }] }),
