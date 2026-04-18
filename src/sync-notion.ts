@@ -100,24 +100,59 @@ async function main() {
   DB.mealSummary = dbMealSummary;
 
   // ---- Parse stdin JSON ----
-  let input: DailyMeals;
+  // 単日 DailyMeals でも、複数日 DailyMeals[] でも受け付ける
+  let days: DailyMeals[];
   try {
     const raw = await readStdin();
-    input = JSON.parse(raw);
-    if (!input.date || !Array.isArray(input.foods) || !Array.isArray(input.meals)) {
-      throw new Error('Invalid shape');
+    const parsed = JSON.parse(raw);
+    days = Array.isArray(parsed) ? parsed : [parsed];
+    for (const d of days) {
+      if (!d.date || !Array.isArray(d.foods) || !Array.isArray(d.meals)) {
+        throw new Error(`Invalid shape for ${d.date ?? '(no date)'}`);
+      }
     }
   } catch (e: any) {
     console.error('[sync-notion] ERROR: Failed to parse stdin JSON:', e.message);
     process.exit(12);
   }
 
-  const dateStr = input.date;
-  console.error(
-    `[sync-notion] date=${dateStr} foods=${input.foods.length} meals=${input.meals.length}`
-  );
+  console.error(`[sync-notion] ${days.length} day${days.length > 1 ? 's' : ''} to sync`);
 
   try {
+    const summaries = [];
+    for (const input of days) {
+      summaries.push(await syncOneDay(token, input));
+    }
+    process.stdout.write(JSON.stringify(summaries.length === 1 ? summaries[0] : summaries, null, 2) + '\n');
+    const totals = summaries.reduce(
+      (acc, s) => ({
+        foodsCreated: acc.foodsCreated + s.foods.created,
+        mealsCreated: acc.mealsCreated + s.meals.created,
+      }),
+      { foodsCreated: 0, mealsCreated: 0 }
+    );
+    console.error(
+      `[sync-notion] All done. foods +${totals.foodsCreated}, meals +${totals.mealsCreated} across ${summaries.length} day(s)`
+    );
+  } catch (e: any) {
+    console.error('[sync-notion] ERROR (Notion API):', e.message);
+    process.exit(11);
+  }
+}
+
+interface SyncSummary {
+  date: string;
+  foods: { total: number; created: number; skipped: number };
+  meals: { total: number; created: number; skipped: number };
+}
+
+async function syncOneDay(token: string, input: DailyMeals): Promise<SyncSummary> {
+  const dateStr = input.date;
+  console.error(
+    `[sync-notion] ===== ${dateStr} (foods=${input.foods.length} meals=${input.meals.length}) =====`
+  );
+
+  {
     // ---- 1. 健康ログ: upsert 当日エントリ ----
     const existingHealthLogs = await queryDatabase(token, DB.healthLog, {
       property: '日付',
@@ -211,17 +246,12 @@ async function main() {
       );
     }
 
-    // ---- 6. サマリ出力（stdout, JSON） ----
-    const summary = {
+    console.error(`[sync-notion] ${dateStr} done: foods +${foodsCreated}, meals +${mealsCreated}`);
+    return {
       date: dateStr,
       foods: { total: input.foods.length, created: foodsCreated, skipped: input.foods.length - foodsCreated },
       meals: { total: input.meals.length, created: mealsCreated, skipped: input.meals.length - mealsCreated },
     };
-    process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
-    console.error(`[sync-notion] Done. foods +${foodsCreated}, meals +${mealsCreated}`);
-  } catch (e: any) {
-    console.error('[sync-notion] ERROR (Notion API):', e.message);
-    process.exit(11);
   }
 }
 

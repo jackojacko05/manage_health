@@ -33,7 +33,13 @@ import type {
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const DEBUG = process.argv.includes('--debug');
-const DATE_ARG = process.argv.find(a => /^\d{4}-\d{2}-\d{2}$/.test(a));
+// 日付引数（複数可・順不同）
+//   0個: effectiveToday() を from=to で使う
+//   1個: from=to=その日
+//   2個以上: ソートして [from, to] の範囲
+const DATE_ARGS = process.argv
+  .filter((a) => /^\d{4}-\d{2}-\d{2}$/.test(a))
+  .sort();
 
 // 終了コード分類（skillのフォールバック判断に使う）:
 //   0: 成功
@@ -64,13 +70,40 @@ const SECTION_KEY_BY_DIVISION: Record<MealDivision, string> = {
   間食: 'sweets',
 };
 
-function today(): string {
-  // システムのローカルタイムゾーン（Mac = JST）をそのまま使う
+// 「実効的な今日」: 朝5時を日付境界とする
+//   00:00〜04:59 に実行 → 前日扱い（例: 翌朝2時のcronで前日分を拾う）
+//   05:00〜23:59 に実行 → 当日
+function effectiveToday(): string {
   const d = new Date();
+  if (d.getHours() < 5) {
+    d.setDate(d.getDate() - 1);
+  }
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+// YYYY-MM-DD 文字列を1日進めて返す
+function nextDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + 1);
+  return (
+    dt.getFullYear() +
+    '-' + String(dt.getMonth() + 1).padStart(2, '0') +
+    '-' + String(dt.getDate()).padStart(2, '0')
+  );
+}
+
+// [from, to] の範囲を1日ずつ返すイテレータ
+function* dateRange(from: string, to: string): Generator<string> {
+  let cur = from;
+  while (cur <= to) {
+    yield cur;
+    if (cur === to) break;
+    cur = nextDate(cur);
+  }
 }
 
 function parseNumber(s: string): number {
@@ -251,21 +284,8 @@ async function scrapeDailyAdvice(page: Page, dateStr: string): Promise<string> {
   return scrapeAdviceTexts(page);
 }
 
-async function main() {
-  const dateStr = DATE_ARG ?? today();
-  console.error(`[scrape-asken] date=${dateStr} debug=${DEBUG}`);
-
-  const browser = await chromium.launch({ headless: !DEBUG, slowMo: DEBUG ? 500 : 0 });
-  const contextOptions: Parameters<typeof browser.newContext>[0] = { locale: 'ja-JP' };
-  if (storageStateExists()) {
-    console.error('[scrape-asken] Loading storageState...');
-    contextOptions.storageState = getStorageStatePath();
-  }
-  const context = await browser.newContext(contextOptions);
-  const page = await context.newPage();
-
-  await ensureLoggedIn(page, context, dateStr);
-
+async function scrapeOneDay(page: Page, dateStr: string): Promise<DailyMeals> {
+  console.error(`[scrape-asken] ===== ${dateStr} =====`);
   const { foods, mealCalories } = await scrapeFoods(page, dateStr);
   console.error(`[scrape-asken] Found ${foods.length} food entries.`);
 
@@ -299,16 +319,52 @@ async function main() {
     console.error(`[scrape-asken] dailyAdvice: ${dailyAdvice.slice(0, 60)}...`);
   }
 
-  await browser.close();
-
-  const result: DailyMeals = {
+  return {
     date: dateStr,
     foods,
     meals,
     dailyAdvice: dailyAdvice || undefined,
   };
-  process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  console.error(`[scrape-asken] Done.`);
+}
+
+async function main() {
+  // 日付範囲の決定
+  let fromDate: string;
+  let toDate: string;
+  if (DATE_ARGS.length === 0) {
+    fromDate = toDate = effectiveToday();
+  } else if (DATE_ARGS.length === 1) {
+    fromDate = toDate = DATE_ARGS[0];
+  } else {
+    fromDate = DATE_ARGS[0];
+    toDate = DATE_ARGS[DATE_ARGS.length - 1];
+  }
+  const dates = Array.from(dateRange(fromDate, toDate));
+  console.error(
+    `[scrape-asken] from=${fromDate} to=${toDate} (${dates.length} day${dates.length > 1 ? 's' : ''}) debug=${DEBUG}`
+  );
+
+  const browser = await chromium.launch({ headless: !DEBUG, slowMo: DEBUG ? 500 : 0 });
+  const contextOptions: Parameters<typeof browser.newContext>[0] = { locale: 'ja-JP' };
+  if (storageStateExists()) {
+    console.error('[scrape-asken] Loading storageState...');
+    contextOptions.storageState = getStorageStatePath();
+  }
+  const context = await browser.newContext(contextOptions);
+  const page = await context.newPage();
+
+  // ログイン判定は範囲の先頭日で1回だけ行う
+  await ensureLoggedIn(page, context, dates[0]);
+
+  const results: DailyMeals[] = [];
+  for (const dateStr of dates) {
+    results.push(await scrapeOneDay(page, dateStr));
+  }
+
+  await browser.close();
+
+  process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+  console.error(`[scrape-asken] Done. ${results.length} day${results.length > 1 ? 's' : ''} scraped.`);
 }
 
 main().catch((err: any) => {
