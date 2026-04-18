@@ -1,0 +1,11 @@
+# 認証情報・セッション（絶対にcommitしない）
+.env
+data/storageState.json
+
+# Node
+node_modules/
+dist/
+npm-debug.log*
+
+# OS
+.DS_Store
