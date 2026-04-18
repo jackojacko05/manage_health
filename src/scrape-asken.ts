@@ -33,6 +33,7 @@ import type {
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const DEBUG = process.argv.includes('--debug');
+const DATE_ARG = process.argv.find(a => /^\d{4}-\d{2}-\d{2}$/.test(a));
 
 // 終了コード分類（skillのフォールバック判断に使う）:
 //   0: 成功
@@ -64,9 +65,12 @@ const SECTION_KEY_BY_DIVISION: Record<MealDivision, string> = {
 };
 
 function today(): string {
+  // システムのローカルタイムゾーン（Mac = JST）をそのまま使う
   const d = new Date();
-  const jst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
-  return jst.toISOString().slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function parseNumber(s: string): number {
@@ -223,7 +227,7 @@ async function scrapeMealNutrients(
 }
 
 async function main() {
-  const dateStr = today();
+  const dateStr = DATE_ARG ?? today();
   console.error(`[scrape-asken] date=${dateStr} debug=${DEBUG}`);
 
   const browser = await chromium.launch({ headless: !DEBUG, slowMo: DEBUG ? 500 : 0 });

@@ -6,7 +6,8 @@
   "scripts": {
     "scrape": "npx tsx src/scrape-asken.ts",
     "scrape:debug": "npx tsx src/scrape-asken.ts --debug",
-    "sync": "bash -c 'set -o pipefail; npx tsx src/scrape-asken.ts | npx tsx src/sync-notion.ts'",
+    "sync": "bash -c 'DOTENV_CONFIG_QUIET=true npx tsx src/scrape-asken.ts > /tmp/asken-scrape.json && DOTENV_CONFIG_QUIET=true npx tsx src/sync-notion.ts < /tmp/asken-scrape.json'",
+    "sync:date": "bash -c 'DOTENV_CONFIG_QUIET=true npx tsx src/scrape-asken.ts \"${DATE}\" > /tmp/asken-scrape.json && DOTENV_CONFIG_QUIET=true npx tsx src/sync-notion.ts < /tmp/asken-scrape.json'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {

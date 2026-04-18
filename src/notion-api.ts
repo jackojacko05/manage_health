@@ -82,8 +82,8 @@ export const P = {
   }),
   number: (n: number) => ({ number: n }),
   select: (name: string) => ({ select: { name } }),
-  date: (startISO: string, isDatetime = false) => ({
-    date: { start: startISO, time_zone: isDatetime ? 'Asia/Tokyo' : null },
+  date: (startISO: string) => ({
+    date: { start: startISO },
   }),
   relation: (pageIds: string[]) => ({
     relation: pageIds.map((id) => ({ id })),

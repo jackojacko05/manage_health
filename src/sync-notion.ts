@@ -29,11 +29,12 @@ import type { DailyMeals, FoodEntry, MealSummary } from './types';
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-// ---- DB IDs (CLAUDE.mdの値) ----
+// ---- DB IDs: Notion REST APIはデータベースページIDを使う（URLの末尾32文字）----
+// collection://xxx（データソースID）ではなく、ページURLのIDを使うこと
 const DB = {
-  healthLog: '69b6d762-8fc3-4d84-8292-32d8f8605998',
-  foodRecord: '8cc7bf9d-ee58-46e2-a732-9dab077f6b70',
-  mealSummary: '8cb932fa-4f23-42de-aadb-190fee05f5dd',
+  healthLog:   '6a477b16d2ae4534baae49b31937d763', // https://notion.so/6a477b16...
+  foodRecord:  'c4062a12c72a4318b31d9eafa99f4e98', // https://notion.so/c4062a12...
+  mealSummary: '2f9bb7b3920c4d30933e3c787828b3bb', // https://notion.so/2f9bb7b3...
 };
 
 function hash(parts: (string | number)[]): string {
@@ -49,31 +50,24 @@ function mealHash(m: MealSummary): string {
 }
 
 function nowJstIso(): string {
-  // e.g. "2026-04-18T19:05:23+09:00"
-  const now = new Date();
-  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  // ローカルタイム（Mac = JST）を ISO8601+09:00 形式で返す
+  const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   return (
-    jst.getUTCFullYear() +
-    '-' +
-    pad(jst.getUTCMonth() + 1) +
-    '-' +
-    pad(jst.getUTCDate()) +
-    'T' +
-    pad(jst.getUTCHours()) +
-    ':' +
-    pad(jst.getUTCMinutes()) +
-    ':' +
-    pad(jst.getUTCSeconds()) +
+    d.getFullYear() +
+    '-' + pad(d.getMonth() + 1) +
+    '-' + pad(d.getDate()) +
+    'T' + pad(d.getHours()) +
+    ':' + pad(d.getMinutes()) +
+    ':' + pad(d.getSeconds()) +
     '+09:00'
   );
 }
 
 function nowJstHHmm(): string {
-  const now = new Date();
-  const jst = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
-  return pad(jst.getUTCHours()) + ':' + pad(jst.getUTCMinutes());
+  return pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
 async function readStdin(): Promise<string> {
@@ -121,7 +115,7 @@ async function main() {
     if (existingHealthLogs.length === 0) {
       healthLogPage = await createPage(token, DB.healthLog, {
         日付: P.title(dateStr),
-        記録日: P.date(dateStr, false),
+        記録日: P.date(dateStr),
       });
       console.error(`[sync-notion] Created 健康ログ for ${dateStr}`);
     } else {
@@ -146,7 +140,7 @@ async function main() {
       const title = `${dateStr} ${nowJstHHmm()} ${food.name}`;
       await createPage(token, DB.foodRecord, {
         エントリID: P.title(title),
-        検出時刻: P.date(nowJstIso(), true),
+        検出時刻: P.date(nowJstIso()),
         食事区分: P.select(food.division),
         メニュー名: P.richText(food.name),
         カロリー: P.number(food.calories),
@@ -174,7 +168,7 @@ async function main() {
       const title = `${dateStr} ${nowJstHHmm()} ${meal.division}`;
       await createPage(token, DB.mealSummary, {
         エントリID: P.title(title),
-        更新時刻: P.date(nowJstIso(), true),
+        更新時刻: P.date(nowJstIso()),
         食事区分: P.select(meal.division),
         カロリー: P.number(meal.calories),
         タンパク質: P.number(meal.protein),
