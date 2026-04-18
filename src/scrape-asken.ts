@@ -84,11 +84,11 @@ function effectiveToday(): string {
   return `${y}-${m}-${day}`;
 }
 
-// YYYY-MM-DD 文字列を1日進めて返す
-function nextDate(dateStr: string): string {
+// YYYY-MM-DD 文字列を指定日数だけシフトして返す
+function shiftDate(dateStr: string, deltaDays: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
-  dt.setDate(dt.getDate() + 1);
+  dt.setDate(dt.getDate() + deltaDays);
   return (
     dt.getFullYear() +
     '-' + String(dt.getMonth() + 1).padStart(2, '0') +
@@ -96,13 +96,13 @@ function nextDate(dateStr: string): string {
   );
 }
 
-// [from, to] の範囲を1日ずつ返すイテレータ
+// [from, to] の範囲を「新しい日付 → 古い日付」の順で1日ずつ返すイテレータ
 function* dateRange(from: string, to: string): Generator<string> {
-  let cur = from;
-  while (cur <= to) {
+  let cur = to;
+  while (cur >= from) {
     yield cur;
-    if (cur === to) break;
-    cur = nextDate(cur);
+    if (cur === from) break;
+    cur = shiftDate(cur, -1);
   }
 }
 
