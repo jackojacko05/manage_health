@@ -6,6 +6,7 @@
   "scripts": {
     "scrape": "npx tsx src/scrape-asken.ts",
     "scrape:debug": "npx tsx src/scrape-asken.ts --debug",
+    "sync": "bash -c 'set -o pipefail; npx tsx src/scrape-asken.ts | npx tsx src/sync-notion.ts'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {

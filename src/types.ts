@@ -3,7 +3,12 @@ export type MealDivision = '朝食' | '昼食' | '夕食' | '間食';
 export interface FoodEntry {
   division: MealDivision;
   name: string;
-  grams: number;
+  quantity: string;
+  calories: number;
+}
+
+export interface MealSummary {
+  division: MealDivision;
   calories: number;
   protein: number;
   fat: number;
@@ -12,6 +17,7 @@ export interface FoodEntry {
 }
 
 export interface DailyMeals {
-  date: string; // "YYYY-MM-DD"
-  entries: FoodEntry[];
+  date: string;
+  foods: FoodEntry[];
+  meals: MealSummary[];
 }
