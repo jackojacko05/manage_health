@@ -193,6 +193,23 @@ async function scrapeFoods(
   return { foods, mealCalories };
 }
 
+function cleanAdviceText(raw: string): string {
+  return raw
+    .replace(/\s+/g, ' ')          // 連続空白・改行を1スペースに
+    .replace(/^\s+|\s+$/g, '')     // 前後トリム
+    .replace(/ (・)/g, '\n・')     // 箇条書きを改行で整形
+    .trim();
+}
+
+async function scrapeAdviceTexts(page: Page): Promise<string> {
+  const texts = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.text_advice'))
+      .map((el) => el.textContent?.trim() ?? '')
+      .filter((t) => t.length > 5)
+  );
+  return texts.map(cleanAdviceText).join('\n\n');
+}
+
 async function scrapeMealNutrients(
   page: Page,
   dateStr: string,
@@ -217,13 +234,21 @@ async function scrapeMealNutrients(
     return m ? parseFloat(m[0]) : 0;
   };
 
+  const advice = await scrapeAdviceTexts(page);
+
   return {
     calories: pick('エネルギー'),
     protein: pick('タンパク質'),
     fat: pick('脂質'),
     carbs: pick('炭水化物'),
     fiber: pick('食物繊維'),
+    advice: advice || undefined,
   };
+}
+
+async function scrapeDailyAdvice(page: Page, dateStr: string): Promise<string> {
+  await page.goto(`https://www.asken.jp/wsp/advice/${dateStr}`, { waitUntil: 'networkidle' });
+  return scrapeAdviceTexts(page);
 }
 
 async function main() {
@@ -269,9 +294,19 @@ async function main() {
     console.error(`[scrape-asken] 間食: ${mealCalories['間食']}kcal (calories only)`);
   }
 
+  const dailyAdvice = await scrapeDailyAdvice(page, dateStr);
+  if (dailyAdvice) {
+    console.error(`[scrape-asken] dailyAdvice: ${dailyAdvice.slice(0, 60)}...`);
+  }
+
   await browser.close();
 
-  const result: DailyMeals = { date: dateStr, foods, meals };
+  const result: DailyMeals = {
+    date: dateStr,
+    foods,
+    meals,
+    dailyAdvice: dailyAdvice || undefined,
+  };
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
   console.error(`[scrape-asken] Done.`);
 }
