@@ -29,12 +29,12 @@ import type { DailyMeals, FoodEntry, MealSummary } from './types';
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-// ---- DB IDs: Notion REST APIはデータベースページIDを使う（URLの末尾32文字）----
-// collection://xxx（データソースID）ではなく、ページURLのIDを使うこと
+// ---- DB IDs: .envの NOTION_DB_* から実行時に読み込む ----
+// ハードコードしない。URLの末尾32文字がページID（collection://xxx とは別物）
 const DB = {
-  healthLog:   '6a477b16d2ae4534baae49b31937d763', // https://notion.so/6a477b16...
-  foodRecord:  'c4062a12c72a4318b31d9eafa99f4e98', // https://notion.so/c4062a12...
-  mealSummary: '2f9bb7b3920c4d30933e3c787828b3bb', // https://notion.so/2f9bb7b3...
+  healthLog:   '',
+  foodRecord:  '',
+  mealSummary: '',
 };
 
 function hash(parts: (string | number)[]): string {
@@ -82,10 +82,22 @@ async function readStdin(): Promise<string> {
 
 async function main() {
   const token = process.env.NOTION_TOKEN;
-  if (!token) {
-    console.error('[sync-notion] ERROR: NOTION_TOKEN not set in .env');
+  const dbHealthLog   = process.env.NOTION_DB_HEALTH_LOG;
+  const dbFoodRecord  = process.env.NOTION_DB_FOOD_RECORD;
+  const dbMealSummary = process.env.NOTION_DB_MEAL_SUMMARY;
+
+  if (!token || !dbHealthLog || !dbFoodRecord || !dbMealSummary) {
+    console.error('[sync-notion] ERROR: .env に NOTION_TOKEN / NOTION_DB_* が未設定');
+    console.error('  NOTION_TOKEN:', token ? '✓' : '✗');
+    console.error('  NOTION_DB_HEALTH_LOG:', dbHealthLog ? '✓' : '✗');
+    console.error('  NOTION_DB_FOOD_RECORD:', dbFoodRecord ? '✓' : '✗');
+    console.error('  NOTION_DB_MEAL_SUMMARY:', dbMealSummary ? '✓' : '✗');
     process.exit(10);
   }
+
+  DB.healthLog   = dbHealthLog;
+  DB.foodRecord  = dbFoodRecord;
+  DB.mealSummary = dbMealSummary;
 
   // ---- Parse stdin JSON ----
   let input: DailyMeals;
