@@ -19,6 +19,9 @@ npm run sync           # 動作確認
 | `npm run scrape:debug` | headfulで手動ログイン・デバッグ |
 | `npm run sync` | 今日の記録をNotionに同期 |
 | `DATE=YYYY-MM-DD npm run sync:date` | 指定日を同期 |
+| `FROM=YYYY-MM-DD TO=YYYY-MM-DD npm run sync:range` | 期間を指定して同期 |
+| `npm run parse:health -- <export.xml> [--from YYYY-MM-DD] [--to YYYY-MM-DD]` | Apple Health export.xml をパースしてJSON出力 |
+| `npm run sync:health` | parse:health の出力をstdinから受け取りNotionに同期 |
 
 ## ルール・規約
 
