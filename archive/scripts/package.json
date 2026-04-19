@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "description": "One-shot backfill scripts. Installed only when a historical import is needed — not part of the live pipeline.",
+  "scripts": {
+    "backfill": "tsx migrate-from-export-xml.ts"
+  },
+  "dependencies": {
+    "sax": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/sax": "^1.2.7",
+    "tsx": "^4.21.0",
+    "typescript": "^5.5.0"
+  }
+}

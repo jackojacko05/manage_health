@@ -1,6 +1,7 @@
-# 認証情報・セッション（絶対にcommitしない）
+# Secrets / per-user config — never commit
 .env
-data/storageState.json
+.mcp.json
+.claude/settings.local.json
 
 # Node
 node_modules/
@@ -9,3 +10,9 @@ npm-debug.log*
 
 # OS
 .DS_Store
+
+# Local runtime artefacts from backfill scripts
+/tmp/
+*.ndjson
+data/storageState.json
+archive/asken-notion/data/storageState.json

@@ -1,82 +1,75 @@
 # manage_health
 
-Apple Health + あすけんの健康データを自動収集してNotion DBに記録するパイプライン。
-
-## アーキテクチャ
-
-```
-[iPhone 22:00]                      [Mac ローカル 毎時:05]         [Notion]
-Apple Health ─→ iOS Shortcut ──────────────────────────────→ 健康ログDB
-(体重/歩数/HRV等)  (Notion API直接)                              ↑
-                                                                │
-                                    Claude Scheduled Task       │
-                                    (5 * * * *)                 │
-                                    Playwright scrape           │
-                                    → あすけんDOM解析           │
-                                    → 差分検出(SHA1ハッシュ)    │
-                                    → 新規エントリ作成 ──────→ 食事記録DB
-                                                           HRV記録DB
-```
-
-## Notion DB
-
-| DB名 | 用途 |
-|---|---|
-| 健康ログ | 1日1レコード（体重・歩数・HRV集計・カロリー収支） |
-| 食事記録 | 食品単位（あすけん毎時スクレイプ、append-only） |
-| HRV記録 | Apple Watch HRVサンプル単位（iOS Shortcutが移植） |
-
-## セットアップ
-
-### 1. 依存インストール
-
-```bash
-npm install
-npx playwright install chromium
-```
-
-### 2. 環境変数
-
-```bash
-cp .env.example .env
-# ASKEN_EMAIL と ASKEN_PASSWORD を編集
-```
-
-### 3. 初回ログイン（ブラウザが開くので手動でログイン）
-
-```bash
-npm run scrape:debug
-```
-
-`data/storageState.json` が生成されたら完了。以降はheadlessで動作する。
-
-### 4. 動作確認
-
-```bash
-npm run scrape  # JSON出力を確認
-```
-
-### 5. Claude Code Scheduled Task 登録
-
-Claude Codeで以下を実行:
+A reproducible Apple Health → BigQuery → Claude pipeline you can run on
+your own GCP project.
 
 ```
-scheduled-task/hourly-asken.md の内容でScheduled Taskを作成して。
-cron: 5 * * * *、モデル: claude-sonnet
+iPhone HealthKit
+  └─ Health Auto Export Pro  (REST Automation)
+       └─ Cloud Run  hae-receiver
+             └─ BigQuery  dataset `health`
+                   ├─ raw_metrics   (hourly, long form)
+                   ├─ heart_rate    (per sample)
+                   ├─ hrv           (per sample)
+                   └─ workouts      (per event)
+                        ▲
+                        │  BigQuery MCP
+                        │  (local via .mcp.json, or
+                        │   managed https://bigquery.googleapis.com/mcp)
+                     Claude — Code, iPhone, Claude.ai
 ```
 
-### 6. iOS Shortcut設定
+Ask *"how is my HRV trending?"* from Claude on your phone. Cost for a
+personal-scale dataset (one person, a decade of history) is inside the
+BigQuery free tier.
 
-`ios-shortcut/health-data-sync.md` の手順に従ってShortcutを作成・設定する。
+## Setup
 
-## セッション失効時
+All the detail lives in the bundled Claude skill:
 
-```bash
-rm data/storageState.json
-npm run scrape:debug  # 手動ログインして再生成
+```
+.claude/skills/health-pipeline/
 ```
 
-## PCスリープ設定
+Open this repo in Claude Code and ask *"set up the health pipeline on my
+GCP project"* — Claude loads the skill and walks you through:
 
-システム環境設定 → バッテリー → 「ディスプレイオフ時もシステムを稼働」をON
-（ディスプレイはスリープしてよいが、システムスリープはNG）
+1. `references/setup.md` — GCP + Cloud Run + BigQuery + MCP, end to end
+2. `references/hae-pro-config.md` — iPhone-side Automation settings
+3. `references/backfill-from-xml.md` — one-shot historical import
+4. `references/customize-metrics.md` — which metrics, and keeping HAE and
+   `export.xml` naming aligned
+5. `references/query-patterns.md` — partition-filter rules and common
+   queries
+6. `references/decisions/` — ADRs explaining why the pipeline looks the
+   way it does
+
+Or just read those files directly. They're the source of truth.
+
+## Requirements
+
+- GCP project with billing enabled (free tier is plenty for one person)
+- iPhone with Apple Health + **Health Auto Export Pro** (paid tier; the
+  free tier has no Automations so nothing pushes in the background)
+- `gcloud`, `bq`, `node >= 20`, `bash`
+
+## Repo layout
+
+```
+manage_health/
+├── .claude/
+│   ├── rules/                          # project-wide coding/privacy rules
+│   └── skills/health-pipeline/         # the distributable skill — start here
+├── hae-receiver/                       # Cloud Run service (TypeScript + Hono)
+├── sql/native-ddl.sql                  # BigQuery table DDL (PROJECT placeholder)
+├── archive/                            # earlier experiments, not part of the live pipeline
+└── README.md
+```
+
+No personal identifiers, no hard-coded project IDs — everything is driven
+by `GCP_PROJECT_ID` / `GCP_REGION` / `BQ_DATASET` env vars. See
+`.env.example` or `.claude/skills/health-pipeline/assets/env.example`.
+
+## License
+
+MIT — see `LICENSE`.
