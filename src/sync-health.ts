@@ -2,17 +2,14 @@
  * Apple Health → Notion 同期スクリプト
  *
  * 使い方:
- *   # parse-health-export.ts の出力を stdin に渡す
- *   npm run parse:health -- ~/Downloads/apple_health_export/export.xml | npm run sync:health
- *
- *   # ファイル経由
  *   npm run parse:health -- ~/Downloads/apple_health_export/export.xml > /tmp/health.json
  *   npm run sync:health < /tmp/health.json
  *
  * 動作:
- *   1. 日別の健康データ（DailyHealth）を健康ログ DB に upsert
- *      ※ あすけん由来プロパティ（食事アドバイス等）は上書きしない
- *   2. HRV サンプルを HRV記録 DB に append-only（startDate をユニークキーに）
+ *   1. 健康ログ DB の全既存日付を一括取得（クエリ1回）
+ *   2. 日別データを並列（concurrency=5）で create / update
+ *      ※ あすけん由来プロパティは上書きしない（HealthKit 列のみ書き込む）
+ *   3. HRV サンプルを HRV記録 DB に append-only
  *
  * 終了コード:
  *   0: 成功
@@ -24,20 +21,36 @@
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { updatePage, createPage, queryDatabase, P, getPropText } from './notion-api';
-import {
-  requireEnv,
-  readStdinJson,
-  upsertHealthLogByDate,
-} from './lib/notion-sync';
+import { requireEnv, readStdinJson } from './lib/notion-sync';
 import type { HealthExport, DailyHealth, HrvSample } from './types';
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
-// ---- HealthKit 由来のプロパティのみ書き込む（ホワイトリスト） ----
+const CONCURRENCY = 5;
+
+// ---- 並列制御 ----
+async function pMap<T, R>(
+  items: T[],
+  fn: (item: T, index: number) => Promise<R>,
+  concurrency: number
+): Promise<R[]> {
+  const results: R[] = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  return results;
+}
+
+// ---- HealthKit 由来プロパティ（ホワイトリスト） ----
 function buildHealthProps(d: DailyHealth): Record<string, unknown> {
   const props: Record<string, unknown> = {};
   if (d.bodyMass      !== undefined) props['体重']             = P.number(d.bodyMass);
-  if (d.bodyFat       !== undefined) props['体脂肪率']          = P.number(Math.round(d.bodyFat * 1000) / 10); // 0.22 → 22.0
+  if (d.bodyFat       !== undefined) props['体脂肪率']          = P.number(Math.round(d.bodyFat * 1000) / 10);
   if (d.leanBodyMass  !== undefined) props['除脂肪体重']        = P.number(d.leanBodyMass);
   if (d.steps         !== undefined) props['歩数']             = P.number(d.steps);
   if (d.distanceKm    !== undefined) props['距離']             = P.number(d.distanceKm);
@@ -48,125 +61,116 @@ function buildHealthProps(d: DailyHealth): Record<string, unknown> {
   return props;
 }
 
-async function syncDailyHealth(
-  token: string,
-  dbHealthLog: string,
-  d: DailyHealth
-): Promise<{ date: string; created: boolean }> {
-  const { page, created } = await upsertHealthLogByDate(token, dbHealthLog, d.date);
-
-  const healthProps = buildHealthProps(d);
-  if (Object.keys(healthProps).length > 0) {
-    await updatePage(token, page.id, healthProps);
-  }
-
-  console.error(
-    `[sync-health] ${d.date} ${created ? 'created' : 'updated'}: ` +
-    `体重=${d.bodyMass ?? '-'} 歩数=${d.steps ?? '-'} HR=${d.avgHeartRate ?? '-'}`
-  );
-  return { date: d.date, created };
-}
-
-async function syncHrvSamples(
-  token: string,
-  dbHealthLog: string,
-  dbHrv: string,
-  samples: HrvSample[]
-): Promise<{ created: number; skipped: number }> {
-  // 健康ログページを日付ごとにキャッシュ
-  const pageCache = new Map<string, string>();  // date → page.id
-
-  async function getHealthLogId(date: string): Promise<string> {
-    if (pageCache.has(date)) return pageCache.get(date)!;
-    const { page } = await upsertHealthLogByDate(token, dbHealthLog, date);
-    pageCache.set(date, page.id);
-    return page.id;
-  }
-
-  // 既存の HRV レコードの計測ID を全件取得（タイトル）
-  // 件数が多い場合は queryDatabase がページネーションで全件取る
-  console.error(`[sync-health] HRV: 既存レコードを確認中...`);
-  const existingHrv = await queryDatabase(token, dbHrv);
-  const existingIds = new Set(
-    existingHrv.map((p) => getPropText(p, '計測ID')).filter(Boolean)
-  );
-  console.error(`[sync-health] HRV: 既存 ${existingIds.size} 件`);
-
-  let created = 0;
-  let skipped = 0;
-
-  for (const s of samples) {
-    if (existingIds.has(s.startDate)) {
-      skipped++;
-      continue;
-    }
-    const date = s.startDate.slice(0, 10);
-    const healthLogId = await getHealthLogId(date);
-
-    await createPage(token, dbHrv, {
-      '計測ID':   P.title(s.startDate),
-      '日付':     P.relation([healthLogId]),
-      '計測時刻': P.date(s.startDate),
-      'SDNN':     P.number(s.sdnn),
-      'ソース':   P.richText(s.source),
-    });
-    existingIds.add(s.startDate);
-    created++;
-    if (created % 10 === 0) {
-      console.error(`[sync-health] HRV: ${created} 件追加済み...`);
-    }
-  }
-
-  return { created, skipped };
-}
-
 async function main() {
   const env = requireEnv([
     'NOTION_TOKEN',
     'NOTION_DB_HEALTH_LOG',
     'NOTION_DB_HRV_RECORD',
   ]);
-  const token      = env.NOTION_TOKEN;
+  const token       = env.NOTION_TOKEN;
   const dbHealthLog = env.NOTION_DB_HEALTH_LOG;
-  const dbHrv      = env.NOTION_DB_HRV_RECORD;
+  const dbHrv       = env.NOTION_DB_HRV_RECORD;
 
   const input = await readStdinJson<HealthExport>();
   if (!Array.isArray(input.dailies) || !Array.isArray(input.hrv)) {
     console.error('[sync-health] ERROR: 入力 JSON が HealthExport 形式ではありません');
     process.exit(12);
   }
-
-  console.error(
-    `[sync-health] Input: ${input.dailies.length} days, ${input.hrv.length} HRV samples`
-  );
+  console.error(`[sync-health] Input: ${input.dailies.length} days, ${input.hrv.length} HRV samples`);
 
   try {
-    // 1. 日別健康データを同期
-    let healthCreated = 0;
-    let healthUpdated = 0;
-    for (const d of input.dailies) {
-      const r = await syncDailyHealth(token, dbHealthLog, d);
-      if (r.created) healthCreated++; else healthUpdated++;
+    // ---- 1. 健康ログ DB の全既存ページを一括取得 ----
+    console.error('[sync-health] 既存の健康ログを一括取得中...');
+    const existingPages = await queryDatabase(token, dbHealthLog);
+    // date → { id, exists }
+    const pageMap = new Map<string, string>(); // date → pageId
+    for (const p of existingPages) {
+      const d = getPropText(p, '日付');
+      if (d) pageMap.set(d, p.id);
     }
-    console.error(
-      `[sync-health] 健康ログ: ${healthCreated} 件作成, ${healthUpdated} 件更新`
-    );
+    console.error(`[sync-health] 既存: ${pageMap.size} 件`);
 
-    // 2. HRV サンプルを同期
-    let hrvResult = { created: 0, skipped: 0 };
+    // ---- 2. 日別データを並列 upsert ----
+    let created = 0;
+    let updated = 0;
+    let done = 0;
+    const total = input.dailies.length;
+
+    await pMap(input.dailies, async (d) => {
+      const healthProps = buildHealthProps(d);
+      let pageId = pageMap.get(d.date);
+      if (!pageId) {
+        // 新規作成
+        const page = await createPage(token, dbHealthLog, {
+          日付: P.title(d.date),
+          記録日: P.date(d.date),
+          ...healthProps,
+        });
+        pageMap.set(d.date, page.id);
+        created++;
+      } else {
+        // 既存を update（HealthKit 列のみ）
+        if (Object.keys(healthProps).length > 0) {
+          await updatePage(token, pageId, healthProps);
+        }
+        updated++;
+      }
+      done++;
+      if (done % 100 === 0 || done === total) {
+        console.error(`[sync-health] 健康ログ: ${done}/${total} (作成${created} 更新${updated})`);
+      }
+    }, CONCURRENCY);
+
+    console.error(`[sync-health] 健康ログ完了: ${created} 件作成, ${updated} 件更新`);
+
+    // ---- 3. HRV サンプルを append-only ----
+    let hrvCreated = 0;
+    let hrvSkipped = 0;
     if (input.hrv.length > 0) {
-      hrvResult = await syncHrvSamples(token, dbHealthLog, dbHrv, input.hrv);
-      console.error(
-        `[sync-health] HRV: +${hrvResult.created} 件追加, ${hrvResult.skipped} 件スキップ`
+      console.error('[sync-health] HRV: 既存レコードを一括取得中...');
+      const existingHrv = await queryDatabase(token, dbHrv);
+      const existingIds = new Set(
+        existingHrv.map((p) => getPropText(p, '計測ID')).filter(Boolean)
       );
+      console.error(`[sync-health] HRV: 既存 ${existingIds.size} 件`);
+
+      const newSamples = input.hrv.filter((s) => !existingIds.has(s.startDate));
+      hrvSkipped = input.hrv.length - newSamples.length;
+
+      await pMap(newSamples, async (s) => {
+        const date = s.startDate.slice(0, 10);
+        let healthLogId = pageMap.get(date);
+        if (!healthLogId) {
+          const page = await createPage(token, dbHealthLog, {
+            日付: P.title(date),
+            記録日: P.date(date),
+          });
+          pageMap.set(date, page.id);
+          healthLogId = page.id;
+        }
+        await createPage(token, dbHrv, {
+          '計測ID':   P.title(s.startDate),
+          '日付':     P.relation([healthLogId]),
+          '計測時刻': P.date(s.startDate),
+          'SDNN':     P.number(s.sdnn),
+          'ソース':   P.richText(s.source),
+        });
+        hrvCreated++;
+        if (hrvCreated % 50 === 0) {
+          console.error(`[sync-health] HRV: ${hrvCreated}/${newSamples.length} 追加済み`);
+        }
+      }, CONCURRENCY);
+
+      console.error(`[sync-health] HRV: +${hrvCreated} 追加, ${hrvSkipped} スキップ`);
     }
 
     const summary = {
-      health: { days: input.dailies.length, created: healthCreated, updated: healthUpdated },
-      hrv: { total: input.hrv.length, created: hrvResult.created, skipped: hrvResult.skipped },
+      health: { days: total, created, updated },
+      hrv: { total: input.hrv.length, created: hrvCreated, skipped: hrvSkipped },
     };
     process.stdout.write(JSON.stringify(summary, null, 2) + '\n');
     console.error('[sync-health] 完了');
+
   } catch (e: any) {
     console.error('[sync-health] ERROR (Notion API):', e.message);
     process.exit(11);

@@ -22,6 +22,8 @@ const TARGET_TYPES = new Set([
   'HKQuantityTypeIdentifierBodyMass',
   'HKQuantityTypeIdentifierBodyFatPercentage',
   'HKQuantityTypeIdentifierLeanBodyMass',
+  'HKQuantityTypeIdentifierHeight',
+  'HKQuantityTypeIdentifierBodyMassIndex',
   'HKQuantityTypeIdentifierStepCount',
   'HKQuantityTypeIdentifierDistanceWalkingRunning',
   'HKQuantityTypeIdentifierBasalEnergyBurned',
@@ -72,6 +74,8 @@ async function main() {
     bodyMassVals: { t: string; v: number }[];
     bodyFatVals:  { t: string; v: number }[];
     leanMassVals: { t: string; v: number }[];
+    heightVals:   { t: string; v: number }[];
+    bmiVals:      { t: string; v: number }[];
     steps: number;
     distanceKm: number;
     basalCalories: number;
@@ -86,6 +90,7 @@ async function main() {
     if (!dailyMap.has(date)) {
       dailyMap.set(date, {
         bodyMassVals: [], bodyFatVals: [], leanMassVals: [],
+        heightVals: [], bmiVals: [],
         steps: 0, distanceKm: 0, basalCalories: 0,
         hrSamples: [], rrSamples: [], spo2Samples: [],
       });
@@ -122,6 +127,15 @@ async function main() {
           day.bodyFatVals.push({ t: startDate, v: value }); break;
         case 'LeanBodyMass':
           day.leanMassVals.push({ t: startDate, v: value }); break;
+        case 'Height': {
+          // cm に正規化（unit が m なら *100）
+          const unit = attrs['unit'] ?? 'cm';
+          const v = unit === 'm' ? value * 100 : value;
+          day.heightVals.push({ t: startDate, v });
+          break;
+        }
+        case 'BodyMassIndex':
+          day.bmiVals.push({ t: startDate, v: value }); break;
         case 'StepCount':
           day.steps += value; break;
         case 'DistanceWalkingRunning': {
@@ -181,6 +195,10 @@ async function main() {
     if (bf !== undefined)  entry.bodyFat = round2(bf);
     const lm = latest(d.leanMassVals);
     if (lm !== undefined)  entry.leanBodyMass = round2(lm);
+    const ht = latest(d.heightVals);
+    if (ht !== undefined)  entry.height = round2(ht);
+    const bmi = latest(d.bmiVals);
+    if (bmi !== undefined) entry.bmi = round2(bmi);
     if (d.steps > 0)       entry.steps = Math.round(d.steps);
     if (d.distanceKm > 0)  entry.distanceKm = round2(d.distanceKm);
     if (d.basalCalories > 0) entry.basalCalories = Math.round(d.basalCalories);

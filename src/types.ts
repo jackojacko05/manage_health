@@ -32,6 +32,8 @@ export interface DailyHealth {
   bodyMass?: number;              // kg (最新値)
   bodyFat?: number;               // 小数 e.g. 0.22 = 22% (最新値)
   leanBodyMass?: number;          // kg (最新値)
+  height?: number;                // cm (最新値)
+  bmi?: number;                   // (最新値)
   steps?: number;                 // 合計歩数
   distanceKm?: number;            // 歩行・走行距離 km (合計)
   basalCalories?: number;         // 安静時消費カロリー kcal (合計)

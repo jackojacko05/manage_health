@@ -11,6 +11,7 @@
     "sync:range": "bash -c 'DOTENV_CONFIG_QUIET=true npx tsx src/scrape-asken.ts \"${FROM}\" \"${TO}\" > /tmp/asken-scrape.json && DOTENV_CONFIG_QUIET=true npx tsx src/sync-notion.ts < /tmp/asken-scrape.json'",
     "parse:health": "npx tsx src/parse-health-export.ts",
     "sync:health": "npx tsx src/sync-health.ts",
+    "export:csv": "npx tsx src/export-health-csv.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
