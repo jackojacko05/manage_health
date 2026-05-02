@@ -16,3 +16,6 @@ npm-debug.log*
 *.ndjson
 data/storageState.json
 archive/asken-notion/data/storageState.json
+
+# Local-only docs (drafts, blog posts, notes)
+/docs/

@@ -41,6 +41,7 @@ Pick the section that matches the user's intent. Each section lists the referenc
 | "Configure the iPhone side (HAE Pro Automations)"   | `references/hae-pro-config.md`           |
 | "Import my historical Apple Health export"          | `references/backfill-from-xml.md`        |
 | "Add/remove metrics" / "HAE and XML names mismatch" | `references/customize-metrics.md`        |
+| "Read this from Supabase / hook up ChatGPT"         | `references/supabase-fdw.md`             |
 | "Why is it built this way?"                         | `references/decisions/00*.md`            |
 | Sanity-check the live tables                        | Run `scripts/verify.sh`                  |
 
