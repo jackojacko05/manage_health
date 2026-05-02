@@ -4,13 +4,22 @@
 --   1. The 'wrappers' extension is enabled in Database → Extensions
 --   2. The 'supabase_vault' extension is enabled (default-on for new projects)
 --   3. You've stored the GCP service account JSON in Vault (see step A below)
---   4. You've replaced both placeholders below:
---        __GCP_PROJECT_ID__   → your GCP project id
---        __SA_KEY_ID__        → the UUID returned by vault.create_secret()
+--   4. The 4 recent-window views exist on the BigQuery side:
+--        health.heart_rate_recent_90d
+--        health.hrv_recent_90d
+--        health.raw_metrics_recent_90d
+--        health.workouts_recent_90d
+--      They're created by `sql/native-ddl.sql` (re-apply if you've only
+--      run an older version).
+--   5. You've replaced the placeholders below:
+--        __SA_KEY_ID__  → the UUID returned by vault.create_secret()
+--        __GCP_PROJECT_ID__ → your GCP project id
+--        __BQ_LOCATION__   → the BigQuery dataset region (e.g. asia-northeast1)
 --
 -- After applying, four `*_recent` views are exposed in `public` (last 90 days
 -- of each BigQuery time-series table). PostgREST publishes them automatically,
--- so ChatGPT's Supabase connector can query them as REST endpoints.
+-- so a logged-in Supabase user — and only a logged-in user — can query them
+-- as REST endpoints.
 
 -- =====================================================================
 -- A. Store the GCP service account key in Vault. Run this ONCE, separately,
@@ -25,7 +34,7 @@
 -- =====================================================================
 
 -- =====================================================================
--- B. Enable the wrapper, register the foreign server, define foreign tables.
+-- B. Enable the wrapper, register the foreign server.
 -- =====================================================================
 
 CREATE EXTENSION IF NOT EXISTS wrappers WITH SCHEMA extensions;
@@ -44,11 +53,38 @@ CREATE SERVER bigquery_server
     dataset_id 'health'
   );
 
+-- bq_health is internal — only `authenticated` is allowed in.
+-- PostgREST does not expose schemas without USAGE granted to the request role.
 CREATE SCHEMA IF NOT EXISTS bq_health;
+REVOKE USAGE ON SCHEMA bq_health FROM anon, public;
+GRANT  USAGE ON SCHEMA bq_health TO authenticated;
 
--- ----- Foreign tables (mirror BigQuery schema, type-mapped to Postgres) -----
+-- =====================================================================
+-- C. Foreign tables that point at the BQ-side recent-90d views.
+--
+--    The WHERE-clause-on-BQ-side approach is what makes this work under
+--    `require_partition_filter = TRUE` — see ADR 006.
+-- =====================================================================
 
-CREATE FOREIGN TABLE bq_health.raw_metrics (
+CREATE FOREIGN TABLE bq_health.heart_rate_recent (
+  start_at     timestamp,
+  bpm          double precision,
+  source       text,
+  ingested_at  timestamp
+)
+  SERVER bigquery_server
+  OPTIONS (table 'heart_rate_recent_90d', location '__BQ_LOCATION__');
+
+CREATE FOREIGN TABLE bq_health.hrv_recent (
+  start_at     timestamp,
+  sdnn         double precision,
+  source       text,
+  ingested_at  timestamp
+)
+  SERVER bigquery_server
+  OPTIONS (table 'hrv_recent_90d', location '__BQ_LOCATION__');
+
+CREATE FOREIGN TABLE bq_health.raw_metrics_recent (
   metric_name  text,
   ts           timestamp,
   value        double precision,
@@ -57,27 +93,9 @@ CREATE FOREIGN TABLE bq_health.raw_metrics (
   ingested_at  timestamp
 )
   SERVER bigquery_server
-  OPTIONS (table 'raw_metrics', location 'US');  -- adjust 'location' to your dataset's region
+  OPTIONS (table 'raw_metrics_recent_90d', location '__BQ_LOCATION__');
 
-CREATE FOREIGN TABLE bq_health.heart_rate (
-  start_at     timestamp,
-  bpm          double precision,
-  source       text,
-  ingested_at  timestamp
-)
-  SERVER bigquery_server
-  OPTIONS (table 'heart_rate', location 'US');
-
-CREATE FOREIGN TABLE bq_health.hrv (
-  start_at     timestamp,
-  sdnn         double precision,
-  source       text,
-  ingested_at  timestamp
-)
-  SERVER bigquery_server
-  OPTIONS (table 'hrv', location 'US');
-
-CREATE FOREIGN TABLE bq_health.workouts (
+CREATE FOREIGN TABLE bq_health.workouts_recent (
   start_at       timestamp,
   end_at         timestamp,
   activity_type  text,
@@ -89,109 +107,37 @@ CREATE FOREIGN TABLE bq_health.workouts (
   ingested_at    timestamp
 )
   SERVER bigquery_server
-  OPTIONS (table 'workouts', location 'US');
+  OPTIONS (table 'workouts_recent_90d', location '__BQ_LOCATION__');
 
 -- =====================================================================
--- C. Recent-90d views in `public` schema.
+-- D. Public-schema wrapper views — what PostgREST exposes as REST tables.
+--    Defined as security_invoker so grants on these views govern access,
+--    not the (foreign-table) underlying objects.
+-- =====================================================================
+
+CREATE OR REPLACE VIEW public.heart_rate_recent  AS SELECT * FROM bq_health.heart_rate_recent;
+CREATE OR REPLACE VIEW public.hrv_recent         AS SELECT * FROM bq_health.hrv_recent;
+CREATE OR REPLACE VIEW public.raw_metrics_recent AS SELECT * FROM bq_health.raw_metrics_recent;
+CREATE OR REPLACE VIEW public.workouts_recent    AS SELECT * FROM bq_health.workouts_recent;
+
+-- =====================================================================
+-- E. Grants — `authenticated` only. Nothing for `anon`.
 --
---    BigQuery enforces require_partition_filter=TRUE on the underlying
---    tables. Every view below pins a date filter so PostgREST queries
---    don't trigger "Cannot query without a filter on partition column".
---    For wider history, use the rpc functions further down.
+--    This means: a request bearing only the project's publishable/anon
+--    key gets nothing. The caller must be a logged-in Supabase Auth user
+--    (i.e. ChatGPT signed in with email + password to your project).
 -- =====================================================================
 
-CREATE OR REPLACE VIEW public.raw_metrics_recent AS
-SELECT * FROM bq_health.raw_metrics
-WHERE ts >= (CURRENT_DATE - INTERVAL '90 days')::timestamp;
+GRANT USAGE  ON SCHEMA public TO authenticated;
 
-CREATE OR REPLACE VIEW public.heart_rate_recent AS
-SELECT * FROM bq_health.heart_rate
-WHERE start_at >= (CURRENT_DATE - INTERVAL '90 days')::timestamp;
+GRANT SELECT ON public.heart_rate_recent  TO authenticated;
+GRANT SELECT ON public.hrv_recent         TO authenticated;
+GRANT SELECT ON public.raw_metrics_recent TO authenticated;
+GRANT SELECT ON public.workouts_recent    TO authenticated;
 
-CREATE OR REPLACE VIEW public.hrv_recent AS
-SELECT * FROM bq_health.hrv
-WHERE start_at >= (CURRENT_DATE - INTERVAL '90 days')::timestamp;
-
-CREATE OR REPLACE VIEW public.workouts_recent AS
-SELECT * FROM bq_health.workouts
-WHERE start_at >= (CURRENT_DATE - INTERVAL '90 days')::timestamp;
-
--- =====================================================================
--- D. Date-range RPC functions for arbitrary windows (still partition-safe).
---
---    PostgREST exposes these as POST /rest/v1/rpc/<name>.
---    Caller MUST pass start_date / end_date — keeps BQ scans bounded.
--- =====================================================================
-
-CREATE OR REPLACE FUNCTION public.raw_metrics_in_range(
-  start_date date,
-  end_date   date,
-  metric     text DEFAULT NULL
-)
-RETURNS TABLE (
-  metric_name text, ts timestamp, value double precision,
-  unit text, source text, ingested_at timestamp
-)
-LANGUAGE sql STABLE AS $$
-  SELECT metric_name, ts, value, unit, source, ingested_at
-  FROM bq_health.raw_metrics
-  WHERE ts >= start_date::timestamp
-    AND ts <  (end_date + INTERVAL '1 day')::timestamp
-    AND (metric IS NULL OR metric_name = metric);
-$$;
-
-CREATE OR REPLACE FUNCTION public.heart_rate_in_range(
-  start_date date, end_date date
-)
-RETURNS TABLE (start_at timestamp, bpm double precision, source text, ingested_at timestamp)
-LANGUAGE sql STABLE AS $$
-  SELECT start_at, bpm, source, ingested_at
-  FROM bq_health.heart_rate
-  WHERE start_at >= start_date::timestamp
-    AND start_at <  (end_date + INTERVAL '1 day')::timestamp;
-$$;
-
-CREATE OR REPLACE FUNCTION public.hrv_in_range(
-  start_date date, end_date date
-)
-RETURNS TABLE (start_at timestamp, sdnn double precision, source text, ingested_at timestamp)
-LANGUAGE sql STABLE AS $$
-  SELECT start_at, sdnn, source, ingested_at
-  FROM bq_health.hrv
-  WHERE start_at >= start_date::timestamp
-    AND start_at <  (end_date + INTERVAL '1 day')::timestamp;
-$$;
-
-CREATE OR REPLACE FUNCTION public.workouts_in_range(
-  start_date date, end_date date
-)
-RETURNS TABLE (
-  start_at timestamp, end_at timestamp, activity_type text,
-  duration_min double precision, total_kcal double precision,
-  distance_km double precision, avg_hr double precision,
-  source text, ingested_at timestamp
-)
-LANGUAGE sql STABLE AS $$
-  SELECT start_at, end_at, activity_type, duration_min, total_kcal,
-         distance_km, avg_hr, source, ingested_at
-  FROM bq_health.workouts
-  WHERE start_at >= start_date::timestamp
-    AND start_at <  (end_date + INTERVAL '1 day')::timestamp;
-$$;
-
--- =====================================================================
--- E. Grants — let the anon role read the views and call the RPCs.
---    Foreign tables themselves stay in `bq_health` (not exposed via PostgREST).
--- =====================================================================
-
-GRANT USAGE ON SCHEMA public TO anon, authenticated;
-
-GRANT SELECT ON public.raw_metrics_recent TO anon, authenticated;
-GRANT SELECT ON public.heart_rate_recent  TO anon, authenticated;
-GRANT SELECT ON public.hrv_recent         TO anon, authenticated;
-GRANT SELECT ON public.workouts_recent    TO anon, authenticated;
-
-GRANT EXECUTE ON FUNCTION public.raw_metrics_in_range(date, date, text) TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.heart_rate_in_range(date, date)        TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.hrv_in_range(date, date)               TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.workouts_in_range(date, date)          TO anon, authenticated;
+-- Belt-and-suspenders: explicitly revoke from anon in case earlier
+-- versions of this script granted it.
+REVOKE SELECT ON public.heart_rate_recent  FROM anon;
+REVOKE SELECT ON public.hrv_recent         FROM anon;
+REVOKE SELECT ON public.raw_metrics_recent FROM anon;
+REVOKE SELECT ON public.workouts_recent    FROM anon;

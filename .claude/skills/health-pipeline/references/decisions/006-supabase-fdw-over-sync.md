@@ -46,14 +46,60 @@ not a technical preference for Postgres.
   ... CASCADE` and the layer is gone.
 - **Good.** Always fresh — no "last synced at" caveats.
 - **Tradeoff.** Every ChatGPT query hits BQ. Mitigated by partition
-  enforcement + the `*_recent` views (90-day cap) + the `*_in_range` RPCs
-  (callers must supply explicit dates).
+  enforcement + the `*_recent_90d` views on the BQ side.
 - **Tradeoff.** Supabase Realtime / RLS-against-userIds don't make sense
   on foreign tables. Acceptable: this is a single-user read facade for
   external LLMs, not a multi-tenant app.
 - **Tradeoff.** The FDW DDL pins each foreign table's BQ region with a
   `location` option. If the dataset region changes, the SQL must be
   re-applied. Documented in `references/supabase-fdw.md`.
+
+## Update — partition_filter pushdown problem
+
+The first attempt put the date filter in a Supabase-side view:
+
+```sql
+CREATE VIEW public.heart_rate_recent AS
+SELECT * FROM bq_health.heart_rate                  -- base BQ table
+WHERE start_at >= (CURRENT_DATE - INTERVAL '90 days')::timestamp;
+```
+
+This **fails** under `require_partition_filter = TRUE`: the BigQuery FDW
+does not always push the WHERE clause down in a form that BigQuery's
+query planner recognises as a partition-elimination predicate, so the
+job is rejected before scanning anything.
+
+**Fix:** define the windowing view on the **BigQuery side**, where
+`CURRENT_DATE()` is evaluated by BQ at query-plan time:
+
+```sql
+CREATE OR REPLACE VIEW `PROJECT.health.heart_rate_recent_90d` AS
+SELECT * FROM `PROJECT.health.heart_rate`
+WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
+```
+
+Foreign tables in Supabase point at the `_recent_90d` views, not at the
+base tables. PostgREST sees `SELECT * FROM bq_health.heart_rate_recent`
+with no WHERE clause and the FDW just generates `SELECT * FROM
+…heart_rate_recent_90d` against BQ; the date predicate is already inside
+the view definition. Partition pruning works, `require_partition_filter`
+is satisfied.
+
+Same idea: keep the work BigQuery does well (partition pruning) on
+BigQuery's side, and treat the FDW as a transport — not a query
+optimiser.
+
+## Update — auth model
+
+The first version granted `SELECT … TO anon, authenticated`. That meant
+the project's publishable / anon key alone could read everything —
+i.e. anyone who saw the key could read every health row.
+
+**Fix:** grant only to `authenticated`, explicitly revoke from `anon`.
+ChatGPT signs into the project as a Supabase Auth user (email +
+password) and queries with the resulting `authenticated` JWT. The
+publishable key on its own is harmless. See
+`references/supabase-fdw.md` §5–7.
 
 ## If we need batch sync later
 
