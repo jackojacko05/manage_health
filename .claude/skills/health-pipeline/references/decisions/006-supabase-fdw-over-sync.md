@@ -89,6 +89,33 @@ Same idea: keep the work BigQuery does well (partition pruning) on
 BigQuery's side, and treat the FDW as a transport — not a query
 optimiser.
 
+## Update — ChatGPT introspection misses views
+
+ChatGPT's Supabase connector enumerates `public` via something close to
+`information_schema.tables` filtered to `BASE TABLE`, so the four
+foreign-backed views (`*_recent`) are invisible to it. The connector
+reports `public tables: []` even when the views exist and return rows
+under direct SQL.
+
+Two responses considered:
+
+- **Stay on FDW, name the views explicitly.** Tested live: ChatGPT
+  runs `SELECT … FROM public.hrv_recent` correctly when given the table
+  name in the chat. Persisting that hint in ChatGPT's Custom
+  Instructions makes the workaround zero-friction afterward.
+- **Materialize into native Supabase tables.** A Cloud Run Job pulls
+  fresh rows from BQ and UPSERTs into vanilla `public.*` tables on a
+  schedule. Heavier (watermark management, secret distribution,
+  duplicate storage) but works with any connector through standard
+  introspection.
+
+**Decided:** the explicit-name workaround is sufficient for the current
+single-user, single-connector scope. The materialization path is the
+documented escape hatch if a future tool can't be coaxed by a chat
+hint. See `archive/supabase-fdw-iteration/README.md` for the full
+narrative and `references/supabase-fdw.md` §8 for the Custom
+Instructions block.
+
 ## Update — auth model
 
 The first version granted `SELECT … TO anon, authenticated`. That meant

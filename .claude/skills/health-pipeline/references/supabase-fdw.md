@@ -187,12 +187,49 @@ In ChatGPT, add the Supabase connector. It will ask for either:
   it's harmless on its own anyway, but the secret key is the only way
   to read.
 
-ChatGPT custom instructions worth setting:
+### Custom instructions (required, not optional)
 
-> When asked about my health, query the `*_recent` views in `public`
-> for the last ~90 days. Never expect tables outside `public` to be
-> readable. The data lives in BigQuery; Supabase is just a read facade,
-> so write operations will fail.
+ChatGPT's connector enumerates `public` and reports `public tables: []`
+even when the four `_recent` views exist — its introspection skips
+foreign-backed views. You **must** name the views explicitly in the
+chat or in Custom Instructions for the connector to find them.
+
+Paste this block into ChatGPT's Custom Instructions (Settings →
+Personalization → Custom Instructions, or the GPT's system prompt):
+
+```
+私の Supabase プロジェクトに BigQuery の Apple Health データへの
+read facade があります。list_tables 系の自動探索には出てきません
+(foreign table 経由のため)。直接 SQL で叩いてください。
+
+利用可能な views (public schema, last 90 days):
+- public.heart_rate_recent  (start_at, bpm, source, ingested_at)
+- public.hrv_recent         (start_at, sdnn, source, ingested_at)
+                            -- sdnn = HRV in ms
+- public.raw_metrics_recent (metric_name, ts, value, unit, source,
+                             ingested_at)
+- public.workouts_recent    (start_at, end_at, activity_type,
+                             duration_min, total_kcal, distance_km,
+                             avg_hr, source, ingested_at)
+
+raw_metrics_recent の代表的な metric_name:
+  step_count, walking_running_distance, active_energy,
+  basal_energy_burned, weight_body_mass, body_fat_percentage,
+  resting_heart_rate, vo2_max, blood_oxygen_saturation,
+  respiratory_rate, sleep_analysis, time_in_daylight,
+  dietary_energy, protein, carbohydrates, total_fat, fiber, sodium
+
+クエリの注意:
+- timestamp は UTC。日次集計は DATE(ts AT TIME ZONE 'Asia/Tokyo') 等
+  で JST に寄せる
+- 90 日より古いデータは無い (recent view のため)
+- 書き込みは不可 (read facade)
+- 質問されたら list_tables ではなく直接 SELECT で投げる
+```
+
+If the connector ever loses the hint and reports "no tables", paste a
+short reminder ("`public.hrv_recent` から SELECT して") into the chat
+and it picks back up.
 
 ## 9. Adjust the recent-window length
 
