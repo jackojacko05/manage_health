@@ -5,7 +5,6 @@ of the live system**. Kept for reference only.
 
 | Directory       | What it was                                                        |
 |-----------------|--------------------------------------------------------------------|
-| `asken-notion/` | Phase 1: Playwright scraper for the Asken nutrition-tracking site, writing to Notion databases. Abandoned in favour of storing everything in BigQuery. |
 | `duckdb/`       | Phase 2: DuckDB + Parquet prototype. Replaced by native BigQuery tables (see `.claude/skills/health-pipeline/references/decisions/001-bigquery-over-duckdb.md`). |
 | `scripts/`      | One-shot migration scripts. `migrate-from-export-xml.ts` is still the supported path for historical backfill (invoked from `references/backfill-from-xml.md`). `migrate-historical.ts` is **deprecated** — it targets a `daily_health` table that no longer exists. |
 

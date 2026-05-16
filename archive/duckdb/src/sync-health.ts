@@ -8,7 +8,7 @@
  * 動作:
  *   1. 健康ログ DB の全既存日付を一括取得（クエリ1回）
  *   2. 日別データを並列（concurrency=5）で create / update
- *      ※ あすけん由来プロパティは上書きしない（HealthKit 列のみ書き込む）
+ *      ※ HealthKit 列のみ書き込む
  *   3. HRV サンプルを HRV記録 DB に append-only
  *
  * 終了コード:

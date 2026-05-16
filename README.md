@@ -6,17 +6,15 @@ your own GCP project.
 ```
 iPhone HealthKit
   └─ Health Auto Export Pro  (REST Automation)
-       └─ Cloud Run  hae-receiver
-             └─ BigQuery  dataset `health`
+       └─ Cloud Run service  hae-receiver
+             └─ BigQuery dataset `health`
                    ├─ raw_metrics   (hourly, long form)
                    ├─ heart_rate    (per sample)
                    ├─ hrv           (per sample)
                    └─ workouts      (per event)
-                        ▲
-                        │  BigQuery MCP
-                        │  (local via .mcp.json, or
-                        │   managed https://bigquery.googleapis.com/mcp)
-                     Claude — Code, iPhone, Claude.ai
+
+Claude — Code, iPhone, Claude.ai
+  └─ BigQuery MCP (local .mcp.json or managed https://bigquery.googleapis.com/mcp)
 ```
 
 Ask *"how is my HRV trending?"* from Claude on your phone. Cost for a
@@ -52,6 +50,8 @@ Or just read those files directly. They're the source of truth.
 - iPhone with Apple Health + **Health Auto Export Pro** (paid tier; the
   free tier has no Automations so nothing pushes in the background)
 - `gcloud`, `bq`, `node >= 20`, `bash`
+
+Asken ingestion has been split into a separate repo at `../asken-sync`.
 
 ## Repo layout
 

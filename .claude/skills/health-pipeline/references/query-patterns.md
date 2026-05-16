@@ -5,14 +5,16 @@ without a filter on the partition column is **rejected at plan time** — it
 won't even run. This is intentional: it keeps scan cost bounded no matter
 how much data accumulates.
 
-| Table         | Partition column | Filter shape                                            |
-|---------------|------------------|---------------------------------------------------------|
-| `raw_metrics` | `DATE(ts)`       | `WHERE DATE(ts) BETWEEN '2025-04-01' AND '2025-04-30'`  |
-| `heart_rate`  | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
-| `hrv`         | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
-| `workouts`    | `DATE(start_at)` | `WHERE DATE(start_at) BETWEEN ... AND ...`              |
+| Table                 | Partition column | Filter shape                                            |
+|-----------------------|------------------|---------------------------------------------------------|
+| `raw_metrics`         | `DATE(ts)`       | `WHERE DATE(ts) BETWEEN '2025-04-01' AND '2025-04-30'`  |
+| `heart_rate`          | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
+| `hrv`                 | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
+| `workouts`            | `DATE(start_at)` | `WHERE DATE(start_at) BETWEEN ... AND ...`              |
 
 `ingest_log` is unpartitioned — no filter needed.
+
+Asken query patterns live in the separate repo `../asken-sync`.
 
 ## Time zone
 

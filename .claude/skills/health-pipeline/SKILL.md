@@ -1,11 +1,11 @@
 ---
 name: health-pipeline
-description: Set up and operate an Apple Health → BigQuery pipeline queryable through the BigQuery MCP. Invoke when the user wants to build the pipeline on their own GCP project, query their health data, backfill historical data, or adjust which HealthKit metrics land in BigQuery.
+description: Set up and operate the Apple Health → BigQuery pipeline queryable through the BigQuery MCP. Invoke when the user wants to build the pipeline on their own GCP project, query their health data, backfill historical Apple Health data, or adjust HealthKit metrics.
 ---
 
 # health-pipeline
 
-This repo's primary deliverable. A reproducible pipeline: **iPhone HealthKit → Health Auto Export Pro → Cloud Run receiver → BigQuery → Claude via MCP**.
+This repo's primary deliverable. A reproducible pipeline: **iPhone HealthKit → Google Cloud → BigQuery → Claude via MCP**.
 
 ## Architecture
 
@@ -28,7 +28,9 @@ iPhone HealthKit
   Claude (Code local `.mcp.json` or Claude.ai remote MCP connector)
 ```
 
-All four time-series tables are partitioned on the date column and have `require_partition_filter = TRUE`. Queries without a `WHERE DATE(...) BETWEEN ... AND ...` clause are rejected by BigQuery.
+Asken ingestion is now in the separate local repo `../asken-sync`.
+
+All time-series tables are partitioned on a date column and have `require_partition_filter = TRUE`. Queries without an appropriate partition `WHERE` clause are rejected by BigQuery.
 
 ## How to use this skill
 
@@ -53,7 +55,7 @@ Every component reads its GCP coordinates from env vars. Nothing is hard-coded.
 |------------------|----------|------------------|------------------------------------------------------|
 | `GCP_PROJECT_ID` | Yes      | —                | `hae-receiver`, `deploy.sh`, backfill script, verify |
 | `GCP_REGION`     | No       | `asia-northeast1`| `deploy.sh`                                          |
-| `BQ_DATASET`     | No       | `health`         | `hae-receiver`, `deploy.sh`, verify                  |
+| `BQ_DATASET`     | No       | `health`         | `hae-receiver`, deploy scripts, verify               |
 
 See `assets/env.example` for a ready-to-fill template and `assets/mcp.json.example` for the Claude Code MCP config template. Neither is committed — copy to the real filename and fill in.
 
@@ -71,6 +73,6 @@ See `assets/env.example` for a ready-to-fill template and `assets/mcp.json.examp
 ## Rules for the agent
 
 1. **Never hard-code** a project ID, Cloud Run URL, service account, or region into committed files. Always use env vars or placeholders. `.claude/rules/no-personal-info.md` is authoritative.
-2. **Always include a partition filter** on BigQuery queries against the four time-series tables. See `references/query-patterns.md` for patterns.
+2. **Always include a partition filter** on BigQuery queries against partitioned tables. See `references/query-patterns.md` for patterns.
 3. **Do not run** `archive/scripts/migrate-historical.ts` — it targets a deprecated `daily_health` table. Use `archive/scripts/migrate-from-export-xml.ts` for backfill instead.
 4. For destructive operations (ALTER, DROP, `--replace=true` loads), confirm with the user before executing.
