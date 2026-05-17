@@ -43,8 +43,8 @@ Derived views:
 | `heart_rate_dedup`    | Silver | sample timestamp  | Deduped heart-rate rows with invalid BPM filtered      |
 | `hrv_dedup`           | Silver | sample timestamp  | Deduped HRV rows with invalid SDNN filtered            |
 | `workouts_dedup`      | Silver | workout event     | Deduped workouts with localized activity names normalized |
-| `sleep_daily_sources` | Silver | sleep_date+source | 05:00 JST sleep-day totals per HealthKit source        |
-| `sleep_daily`         | Gold   | sleep_date        | Deduped daily sleep, one selected source per 05:00 day |
+| `sleep_daily_sources` | Silver | sleep_date+source | Sleep segments assigned by 05:00 JST start-day per source |
+| `sleep_daily`         | Gold   | sleep_date        | Deduped daily sleep; Apple Watch preferred, Pokemon Sleep fallback |
 
 All time-series tables have `require_partition_filter = TRUE`. Queries,
 including Supabase FDW queries, **must** filter on the partition column.

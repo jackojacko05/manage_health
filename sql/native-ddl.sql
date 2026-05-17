@@ -169,7 +169,7 @@ filtered AS (
     AND (metric_name != 'weight_body_mass' OR value BETWEEN 20 AND 300)
     AND (metric_name != 'vo2_max' OR value BETWEEN 1 AND 100)
     AND (metric_name != 'respiratory_rate' OR value BETWEEN 5 AND 60)
-    AND (metric_name != 'sleep_analysis' OR value BETWEEN 1 AND 36 * 3600)
+    AND (metric_name != 'sleep_analysis' OR value BETWEEN 1 AND 14 * 3600)
 )
 SELECT metric_name, ts, value, unit, source, ingested_at
 FROM filtered
@@ -279,6 +279,6 @@ SET OPTIONS (
 
 -- ===== Sleep normalization views =====
 -- Keep in sync with sql/sleep-ddl.sql.
--- These views split sleep_analysis segments on a 05:00 JST day boundary,
+-- These views assign whole sleep_analysis segments to a 05:00 JST sleep day,
 -- aggregate per source, and select one representative source per day to avoid
 -- double counting Apple Health / Pokemon Sleep / AutoSleep overlaps.

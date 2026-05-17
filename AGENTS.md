@@ -76,23 +76,25 @@ Use Silver objects for analysis unless you are explicitly auditing raw ingest.
 - Invalid/null analytical values are filtered from Silver, including implausible
   BMI, body fat, blood oxygen, height, body mass, HR, HRV, workout duration,
   workout distance, workout kcal, and workout average HR.
+- Sleep rows assign each whole sleep segment to the sleep day determined by the
+  segment start with a 05:00 JST boundary. `sleep_daily` selects Apple Watch
+  first and uses Pokemon Sleep only as the last fallback; implausible source-day
+  totals are not selected.
 - `workouts_dedup` normalizes post-2026-04-20 localized activity labels to the
-  English labels used by older data. It keeps rows with missing `total_kcal`
-  because the current HAE workout sync is not sending that field.
+  English labels used by older data. It prefers rows with richer kcal, distance,
+  HR, and source fields.
 
 ## Known Sync Status
 
 Current data audit notes, based on all-period BigQuery checks:
 
-- Sleep payloads include `sleep_analysis`, but older receiver revisions skipped
-  category-style sleep rows without a numeric `qty`. Revision
-  `hae-receiver-00009-854` parses sleep durations; existing 2026-04-20+
-  gaps need a manual/automatic HAE re-export with enough lookback.
-- Workout ingest still sends events after 2026-04-20. Revision
-  `hae-receiver-00009-854` parses the newer `activeEnergy*` and distance
-  workout keys; `source` may remain missing when HAE does not send it. Silver
-  normalizes localized activity labels and prefers rows with richer kcal,
-  distance, HR, and source fields.
+- Sleep payloads include `sleep_analysis`; receiver revisions from
+  `hae-receiver-00009-854` parse category-style sleep rows without a numeric
+  `qty`. Re-export 2026-04-20+ after receiver changes if recent sleep days are
+  missing.
+- Workout ingest sends events after 2026-04-20. Receiver revisions from
+  `hae-receiver-00009-854` parse the newer `activeEnergy*` and distance workout
+  keys; `source` may remain missing when HAE does not send it.
 - HRV analysis Gold tables (`hrv_regression_data`, `hrv_regression_v2`,
   `hrv_seg_v3`) are stale after 2026-04-20 and should be regenerated before
   using them for current analysis.

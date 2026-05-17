@@ -2,21 +2,23 @@
 --
 -- `raw_metrics.sleep_analysis` is source-fragmented: Apple Watch, Pokemon
 -- Sleep, AutoSleep, Zepp Life, and other sources can all write rows for the
--- same night. These views split sleep segments on a 05:00 JST day boundary,
--- aggregate per source, then select one daily representative source.
+-- same night. These views assign each whole sleep segment to a 05:00 JST sleep
+-- day by segment start, aggregate per source, then select one daily
+-- representative source. Apple Watch is preferred; Pokemon Sleep is fallback.
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_daily_sources` AS
 WITH segments AS (
   SELECT
     source,
     CASE
-      WHEN source = 'AutoSleep' THEN 1
-      WHEN source = 'Zepp Life' THEN 2
-      WHEN source = 'Pokémon Sleep' THEN 3
-      WHEN source LIKE '%Apple%Watch%' THEN 4
-      WHEN source = 'Health' THEN 5
+      WHEN source LIKE '%Apple%Watch%' THEN 1
+      WHEN source = 'Health' THEN 2
+      WHEN source = 'AutoSleep' THEN 3
+      WHEN source = 'Zepp Life' THEN 4
+      WHEN source IN ('Pokémon Sleep', 'Pokemon Sleep') THEN 99
       ELSE 90
     END AS source_priority,
+    DATE(TIMESTAMP_SUB(ts, INTERVAL 5 HOUR), 'Asia/Tokyo') AS sleep_date,
     ts AS segment_start,
     TIMESTAMP_ADD(ts, INTERVAL CAST(ROUND(value) AS INT64) SECOND) AS segment_end,
     value AS raw_seconds
@@ -25,30 +27,7 @@ WITH segments AS (
     AND metric_name = 'sleep_analysis'
     AND value IS NOT NULL
     AND value > 0
-    AND value <= 36 * 3600
-),
-expanded AS (
-  SELECT
-    sleep_date,
-    TIMESTAMP(DATETIME(sleep_date, TIME '05:00:00'), 'Asia/Tokyo') AS window_start,
-    TIMESTAMP(DATETIME(DATE_ADD(sleep_date, INTERVAL 1 DAY), TIME '05:00:00'), 'Asia/Tokyo') AS window_end,
-    source,
-    source_priority,
-    segment_start,
-    segment_end,
-    GREATEST(
-      0,
-      TIMESTAMP_DIFF(
-        LEAST(segment_end, TIMESTAMP(DATETIME(DATE_ADD(sleep_date, INTERVAL 1 DAY), TIME '05:00:00'), 'Asia/Tokyo')),
-        GREATEST(segment_start, TIMESTAMP(DATETIME(sleep_date, TIME '05:00:00'), 'Asia/Tokyo')),
-        SECOND
-      )
-    ) AS overlap_seconds
-  FROM segments,
-  UNNEST(GENERATE_DATE_ARRAY(
-    DATE(TIMESTAMP_SUB(segment_start, INTERVAL 5 HOUR), 'Asia/Tokyo'),
-    DATE(TIMESTAMP_SUB(TIMESTAMP_SUB(segment_end, INTERVAL 1 SECOND), INTERVAL 5 HOUR), 'Asia/Tokyo')
-  )) AS sleep_date
+    AND value <= 14 * 3600
 ),
 source_days AS (
   SELECT
@@ -57,13 +36,18 @@ source_days AS (
     window_end,
     source,
     source_priority,
-    SUM(overlap_seconds) AS sleep_seconds,
-    ROUND(SUM(overlap_seconds) / 3600, 2) AS sleep_hours,
+    SUM(raw_seconds) AS sleep_seconds,
+    ROUND(SUM(raw_seconds) / 3600, 2) AS sleep_hours,
     COUNT(*) AS segment_count,
     MIN(segment_start) AS first_segment_start,
     MAX(segment_end) AS last_segment_end
-  FROM expanded
-  WHERE overlap_seconds > 0
+  FROM (
+    SELECT
+      *,
+      TIMESTAMP(DATETIME(sleep_date, TIME '05:00:00'), 'Asia/Tokyo') AS window_start,
+      TIMESTAMP(DATETIME(DATE_ADD(sleep_date, INTERVAL 1 DAY), TIME '05:00:00'), 'Asia/Tokyo') AS window_end
+    FROM segments
+  )
   GROUP BY sleep_date, window_start, window_end, source, source_priority
 )
 SELECT
@@ -73,7 +57,7 @@ FROM source_days;
 
 ALTER VIEW `__PROJECT__.health.sleep_daily_sources`
 SET OPTIONS (
-  description = 'Silver sleep source-day normalization. Filter sleep_date for bounded analysis; source rows can overlap before daily selection.'
+  description = 'Silver sleep source-day normalization. Whole sleep segments are assigned by start time to the 05:00 JST sleep day. Filter sleep_date for bounded analysis; source rows can overlap before daily selection.'
 );
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_daily` AS
@@ -102,6 +86,7 @@ ranked AS (
       ORDER BY IF(is_plausible, 0, 1), source_priority, sleep_hours DESC, source
     ) AS rn
   FROM source_days
+  WHERE is_plausible
 )
 SELECT
   r.sleep_date,
@@ -123,5 +108,5 @@ WHERE r.rn = 1;
 
 ALTER VIEW `__PROJECT__.health.sleep_daily`
 SET OPTIONS (
-  description = 'Gold daily sleep with a 05:00 JST day boundary and one selected source per day. Filter sleep_date for bounded analysis.'
+  description = 'Gold daily sleep with whole segments assigned by start time to the 05:00 JST sleep day and one selected source per day. Apple Watch is preferred and Pokemon Sleep is fallback. Filter sleep_date for bounded analysis.'
 );
