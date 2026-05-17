@@ -112,7 +112,7 @@ Tap the manual trigger once — within a minute you should see rows in
 
 ## 7. (Optional) Backfill history from export.xml
 
-See `backfill-from-xml.md`. One-time step, brings in years of data.
+See `backfill-from-xml.md`. One-time step, brings in years of Apple Health data.
 
 ## 8. Connect Claude
 
@@ -144,3 +144,7 @@ bash .claude/skills/health-pipeline/scripts/verify.sh
 
 Expected: non-zero row counts in all four time-series tables and a recent
 `MAX(ts)` on `raw_metrics`.
+
+## Asken
+
+Asken ingestion is maintained separately in `../asken-sync`.

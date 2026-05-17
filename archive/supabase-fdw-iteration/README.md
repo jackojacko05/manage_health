@@ -1,9 +1,8 @@
 # Supabase FDW iteration log
 
-Chronological record of how the Supabase BigQuery FDW path landed at its
-current shape. Kept here so the working scripts that were pasted live
-into the Supabase SQL editor are recoverable, and so the **why** behind
-the design isn't only in ADR 006.
+Chronological record of the Supabase BigQuery FDW iterations. Kept here so the
+working scripts that were pasted live into the Supabase SQL editor are
+recoverable, and so the **why** behind the design isn't only in ADR 006.
 
 This is not on the runtime path. The current authoritative DDL lives in
 `sql/supabase-fdw.sql` and the corresponding documentation in
@@ -116,10 +115,24 @@ Two paths considered:
   duplicate storage — but every connector then sees the data through
   vanilla introspection.
 
-Decided: **A**. The current design is acceptable for a single-user read
-facade; the cost of B isn't justified yet. If a future tool surfaces
-that can't be coaxed with explicit table names, materialization is the
-escape hatch (B is documented as the alternative in ADR 006).
+Decided at the time: **A**. This was later superseded by iteration 5.
+
+## Iteration 5 — canonical Silver/Gold foreign tables
+
+The `_recent` / `*_recent_90d` compatibility layer was removed. Supabase now
+exposes the same canonical Silver/Gold BigQuery objects that agents use
+elsewhere:
+
+- Silver: `raw_metrics_dedup`, `heart_rate_dedup`, `hrv_dedup`,
+  `workouts_dedup`, `sleep_daily_sources`, `asken_foods_effective`,
+  `asken_meals_effective`
+- Gold: `sleep_daily`, `hrv_regression_data`, `hrv_regression_v2`,
+  `hrv_seg_v3`
+
+There are no active bounded-window views. Supabase callers must include the
+documented date filter on each query. If the BigQuery FDW cannot push a
+required predicate down, use BigQuery MCP/CLI directly instead of restoring
+`_recent` views.
 
 ## Files in this folder
 
@@ -132,3 +145,6 @@ escape hatch (B is documented as the alternative in ADR 006).
   close the anon-read hole on the existing project. The current
   `sql/supabase-fdw.sql` already grants only to `authenticated`, so
   this script is unnecessary on a fresh setup.
+
+The scripts in this folder are historical artifacts. Do not run them for the
+current pipeline.

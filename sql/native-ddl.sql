@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.raw_metrics` (
 PARTITION BY DATE(ts)
 CLUSTER BY metric_name;
 
+ALTER TABLE `__PROJECT__.health.raw_metrics`
+SET OPTIONS (
+  description = 'Bronze raw HAE metrics. Always filter DATE(ts) when querying directly or through Supabase.'
+);
+
 -- ===== HRV samples =====
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.hrv` (
   start_at     TIMESTAMP NOT NULL,
@@ -39,6 +44,11 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.hrv` (
 )
 PARTITION BY DATE(start_at);
 
+ALTER TABLE `__PROJECT__.health.hrv`
+SET OPTIONS (
+  description = 'Bronze raw HRV samples. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
+
 -- ===== Heart rate samples =====
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.heart_rate` (
   start_at     TIMESTAMP NOT NULL,
@@ -48,6 +58,11 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.heart_rate` (
   PRIMARY KEY (start_at) NOT ENFORCED
 )
 PARTITION BY DATE(start_at);
+
+ALTER TABLE `__PROJECT__.health.heart_rate`
+SET OPTIONS (
+  description = 'Bronze raw heart-rate samples. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
 
 -- ===== Workouts =====
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.workouts` (
@@ -64,6 +79,11 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.workouts` (
 )
 PARTITION BY DATE(start_at);
 
+ALTER TABLE `__PROJECT__.health.workouts`
+SET OPTIONS (
+  description = 'Bronze raw workout events. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
+
 -- ===== Ingest log (idempotency aid for batch loads) =====
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.ingest_log` (
   source       STRING NOT NULL,   -- 'hae-receiver' | 'historical-export-xml' | ...
@@ -74,104 +94,206 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.ingest_log` (
   PRIMARY KEY (source, file_hash) NOT ENFORCED
 );
 
--- =====================================================================
--- あすけん (asken) — written by the asken-scraper Cloud Run Job (hourly)
---
--- Date is JST calendar date. Joins with HAE tables via
---   DATE(ah.ts, 'Asia/Tokyo') = asken.date
--- so no timezone math is needed at query time. See
--- .claude/skills/health-pipeline/references/query-patterns.md for
--- meal-window correlation helpers.
---
--- All four tables are append-only. Per-row dedupe is done by SHA1[0:8]
--- hashes computed in TypeScript (asken-scraper/src/parse.ts):
---   asken_foods.food_hash         = SHA1(division|name|quantity)[0:8]
---   asken_meals.meal_hash         = SHA1(division|cal|p|f|c|fb)[0:8]
---   asken_meal_advice.advice_hash = SHA1(division|advice)[0:8]
---   asken_daily_advice.advice_hash= SHA1(advice)[0:8]
--- Same enforcement convention as the HAE tables: after data lands, run
---   ALTER TABLE `__PROJECT__.health.asken_foods` SET OPTIONS(require_partition_filter = TRUE);
--- (and the same for asken_meals / asken_meal_advice / asken_daily_advice).
--- =====================================================================
+ALTER TABLE `__PROJECT__.health.ingest_log`
+SET OPTIONS (
+  description = 'Bronze operational ingest log. Unpartitioned; no date filter is required.'
+);
 
--- ===== Per-food entries =====
-CREATE TABLE IF NOT EXISTS `__PROJECT__.health.asken_foods` (
-  date         DATE      NOT NULL,    -- JST calendar date
-  division     STRING    NOT NULL,    -- 朝食 / 昼食 / 夕食 / 間食
-  name         STRING    NOT NULL,    -- food / dish name as displayed in asken
-  quantity     STRING,                 -- raw text (e.g. "150g", "1個")
-  calories     FLOAT64,                -- kcal
-  food_hash    STRING    NOT NULL,
-  ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
-  PRIMARY KEY (date, food_hash) NOT ENFORCED
+-- ===== Silver normalization views =====
+-- These views dedupe repeated ingest rows and absorb HAE shape drift. The
+-- canonical metric names / units follow the format observed from 2026-04-20
+-- onward. They intentionally do not impose a fixed date window. Queries through
+-- BigQuery or Supabase must still include the partition filter shown in each
+-- view description.
+CREATE OR REPLACE VIEW `__PROJECT__.health.raw_metrics_dedup` AS
+WITH renamed AS (
+  SELECT
+    CASE metric_name
+      WHEN 'stair_ascent_speed' THEN 'stair_speed_up'
+      WHEN 'stair_descent_speed' THEN 'stair_speed_down'
+      WHEN 'six_minute_walk_test_distance' THEN 'six_minute_walking_test_distance'
+      ELSE metric_name
+    END AS metric_name,
+    ts,
+    value AS raw_value,
+    unit AS raw_unit,
+    source,
+    ingested_at
+  FROM `__PROJECT__.health.raw_metrics`
+  WHERE metric_name IS NOT NULL
+    AND ts IS NOT NULL
+    AND value IS NOT NULL
+),
+normalized AS (
+  SELECT
+    metric_name,
+    ts,
+    CASE
+      WHEN metric_name IN ('active_energy', 'basal_energy_burned', 'dietary_energy')
+        AND LOWER(raw_unit) = 'kcal' THEN raw_value * 4.184
+      WHEN metric_name = 'height'
+        AND (LOWER(raw_unit) = 'cm' OR raw_value > 3) THEN raw_value / 100
+      WHEN metric_name IN (
+          'apple_walking_steadiness',
+          'body_fat_percentage',
+          'blood_oxygen_saturation',
+          'walking_asymmetry_percentage',
+          'walking_double_support_percentage'
+        )
+        AND raw_value <= 1 THEN raw_value * 100
+      WHEN metric_name = 'apple_stand_hour'
+        AND (raw_value = 3600 OR raw_unit IS NULL OR raw_unit = '') THEN IF(raw_value = 0, 0, 1)
+      WHEN metric_name = 'sleep_analysis'
+        AND LOWER(raw_unit) IN ('hr', 'hour', 'hours')
+        AND raw_value <= 24 THEN raw_value * 3600
+      WHEN metric_name = 'sleep_analysis'
+        AND LOWER(raw_unit) IN ('min', 'minute', 'minutes')
+        AND raw_value <= 24 * 60 THEN raw_value * 60
+      ELSE raw_value
+    END AS value,
+    CASE
+      WHEN metric_name IN ('active_energy', 'basal_energy_burned', 'dietary_energy') THEN 'kJ'
+      WHEN metric_name = 'height' THEN 'm'
+      WHEN metric_name IN (
+        'apple_walking_steadiness',
+        'body_fat_percentage',
+        'blood_oxygen_saturation',
+        'walking_asymmetry_percentage',
+        'walking_double_support_percentage'
+      ) THEN '%'
+      WHEN metric_name = 'apple_stand_hour' THEN 'count'
+      WHEN metric_name = 'sleep_analysis' THEN 's'
+      WHEN metric_name = 'vo2_max' THEN 'ml/(kg·min)'
+      ELSE raw_unit
+    END AS unit,
+    source,
+    ingested_at
+  FROM renamed
+),
+filtered AS (
+  SELECT *
+  FROM normalized
+  WHERE value >= 0
+    AND (metric_name != 'body_mass_index' OR value BETWEEN 10 AND 80)
+    AND (metric_name != 'body_fat_percentage' OR value BETWEEN 1 AND 80)
+    AND (metric_name != 'blood_oxygen_saturation' OR value BETWEEN 50 AND 100)
+    AND (metric_name != 'apple_walking_steadiness' OR value BETWEEN 0 AND 100)
+    AND (metric_name != 'walking_asymmetry_percentage' OR value BETWEEN 0 AND 100)
+    AND (metric_name != 'walking_double_support_percentage' OR value BETWEEN 0 AND 100)
+    AND (metric_name != 'height' OR value BETWEEN 0.5 AND 2.5)
+    AND (metric_name != 'weight_body_mass' OR value BETWEEN 20 AND 300)
+    AND (metric_name != 'vo2_max' OR value BETWEEN 1 AND 100)
+    AND (metric_name != 'respiratory_rate' OR value BETWEEN 5 AND 60)
+    AND (metric_name != 'sleep_analysis' OR value BETWEEN 1 AND 14 * 3600)
 )
-PARTITION BY date
-CLUSTER BY division;
+SELECT metric_name, ts, value, unit, source, ingested_at
+FROM filtered
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY metric_name, ts, FORMAT('%g', value), unit, source
+  ORDER BY ingested_at DESC
+) = 1;
 
--- ===== Per-meal macro summaries (朝/昼/夕 with macros, 間食 calories only) =====
-CREATE TABLE IF NOT EXISTS `__PROJECT__.health.asken_meals` (
-  date         DATE      NOT NULL,
-  division     STRING    NOT NULL,
-  calories     FLOAT64,
-  protein_g    FLOAT64,
-  fat_g        FLOAT64,
-  carbs_g      FLOAT64,
-  fiber_g      FLOAT64,
-  meal_hash    STRING    NOT NULL,
-  ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
-  PRIMARY KEY (date, meal_hash) NOT ENFORCED
+ALTER VIEW `__PROJECT__.health.raw_metrics_dedup`
+SET OPTIONS (
+  description = 'Silver normalized HAE metrics. Canonical names/units follow the 2026-04-20+ HAE format, invalid values are filtered, and duplicate ingests are collapsed. Always filter DATE(ts) when querying directly or through Supabase.'
+);
+
+CREATE OR REPLACE VIEW `__PROJECT__.health.hrv_dedup` AS
+SELECT start_at, sdnn, source, ingested_at
+FROM `__PROJECT__.health.hrv`
+WHERE start_at IS NOT NULL
+  AND sdnn > 0
+  AND sdnn <= 300
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY start_at, FORMAT('%g', sdnn), source
+  ORDER BY ingested_at DESC
+) = 1;
+
+ALTER VIEW `__PROJECT__.health.hrv_dedup`
+SET OPTIONS (
+  description = 'Silver deduped HRV samples. Invalid SDNN values are filtered. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
+
+CREATE OR REPLACE VIEW `__PROJECT__.health.heart_rate_dedup` AS
+SELECT start_at, bpm, source, ingested_at
+FROM `__PROJECT__.health.heart_rate`
+WHERE start_at IS NOT NULL
+  AND bpm BETWEEN 30 AND 220
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY start_at, FORMAT('%g', bpm), source
+  ORDER BY ingested_at DESC
+) = 1;
+
+ALTER VIEW `__PROJECT__.health.heart_rate_dedup`
+SET OPTIONS (
+  description = 'Silver deduped heart-rate samples. Invalid BPM values are filtered. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
+
+CREATE OR REPLACE VIEW `__PROJECT__.health.workouts_dedup` AS
+WITH normalized AS (
+  SELECT
+    start_at,
+    end_at,
+    CASE TRIM(activity_type)
+      WHEN 'ピラティス' THEN 'Pilates'
+      WHEN '屋内 歩く' THEN 'Walking'
+      WHEN '屋外 歩く' THEN 'Walking'
+      WHEN '卓球' THEN 'TableTennis'
+      WHEN 'ヨガ' THEN 'Yoga'
+      WHEN '屋外 サイクリング' THEN 'Cycling'
+      WHEN '柔軟性' THEN 'Flexibility'
+      WHEN 'クールダウン' THEN 'Cooldown'
+      WHEN '機能的筋力トレーニング' THEN 'StrengthTraining'
+      ELSE activity_type
+    END AS activity_type,
+    duration_min,
+    total_kcal,
+    distance_km,
+    avg_hr,
+    source,
+    ingested_at
+  FROM `__PROJECT__.health.workouts`
+  WHERE start_at IS NOT NULL
+    AND end_at IS NOT NULL
 )
-PARTITION BY date
-CLUSTER BY division;
+SELECT
+  start_at,
+  end_at,
+  activity_type,
+  duration_min,
+  total_kcal,
+  distance_km,
+  avg_hr,
+  source,
+  ingested_at
+FROM normalized
+WHERE duration_min IS NOT NULL
+  AND end_at >= start_at
+  AND duration_min BETWEEN 0 AND 1440
+  AND (total_kcal IS NULL OR total_kcal BETWEEN 0 AND 5000)
+  AND (distance_km IS NULL OR distance_km BETWEEN 0 AND 500)
+  AND (avg_hr IS NULL OR avg_hr BETWEEN 30 AND 220)
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY
+    start_at,
+    end_at,
+    activity_type,
+    FORMAT('%g', duration_min)
+  ORDER BY
+    IF(total_kcal IS NULL, 1, 0),
+    IF(distance_km IS NULL, 1, 0),
+    IF(avg_hr IS NULL, 1, 0),
+    IF(source IS NULL, 1, 0),
+    ingested_at DESC
+) = 1;
 
--- ===== Per-meal advice text (full history; advice rotates over the day) =====
-CREATE TABLE IF NOT EXISTS `__PROJECT__.health.asken_meal_advice` (
-  date         DATE      NOT NULL,
-  division     STRING    NOT NULL,
-  advice       STRING    NOT NULL,
-  advice_hash  STRING    NOT NULL,
-  ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
-  PRIMARY KEY (date, advice_hash) NOT ENFORCED
-)
-PARTITION BY date
-CLUSTER BY division;
+ALTER VIEW `__PROJECT__.health.workouts_dedup`
+SET OPTIONS (
+  description = 'Silver deduped workout events. 2026-04-20+ localized activity names are normalized, invalid durations/ranges are filtered, and duplicate ingests are collapsed. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
 
--- ===== Whole-day advice text (full history) =====
-CREATE TABLE IF NOT EXISTS `__PROJECT__.health.asken_daily_advice` (
-  date         DATE      NOT NULL,
-  advice       STRING    NOT NULL,
-  advice_hash  STRING    NOT NULL,
-  ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
-  PRIMARY KEY (date, advice_hash) NOT ENFORCED
-)
-PARTITION BY date;
-
--- =====================================================================
--- Recent-90d views — consumed by the Supabase BigQuery FDW.
---
--- Why views, not direct table foreign-references in Supabase:
---   The Supabase BigQuery FDW does not always push WHERE clauses down
---   in a form that BigQuery recognises for partition elimination, so
---   `require_partition_filter = TRUE` causes the query to be rejected.
---   Defining the date filter on the BQ side using CURRENT_DATE() — which
---   is evaluated by BigQuery at query-plan time — guarantees the prune.
---
--- Adjust the 90-day window here if you need wider history exposed.
--- See `.claude/skills/health-pipeline/references/supabase-fdw.md`.
--- =====================================================================
-
-CREATE OR REPLACE VIEW `__PROJECT__.health.heart_rate_recent_90d` AS
-SELECT * FROM `__PROJECT__.health.heart_rate`
-WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
-
-CREATE OR REPLACE VIEW `__PROJECT__.health.hrv_recent_90d` AS
-SELECT * FROM `__PROJECT__.health.hrv`
-WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
-
-CREATE OR REPLACE VIEW `__PROJECT__.health.raw_metrics_recent_90d` AS
-SELECT * FROM `__PROJECT__.health.raw_metrics`
-WHERE DATE(ts) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
-
-CREATE OR REPLACE VIEW `__PROJECT__.health.workouts_recent_90d` AS
-SELECT * FROM `__PROJECT__.health.workouts`
-WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
+-- ===== Sleep normalization views =====
+-- Keep in sync with sql/sleep-ddl.sql.
+-- These views assign whole sleep_analysis segments to a 05:00 JST sleep day,
+-- aggregate per source, and select one representative source per day to avoid
+-- double counting Apple Health / Pokemon Sleep / AutoSleep overlaps.

@@ -6,17 +6,15 @@ your own GCP project.
 ```
 iPhone HealthKit
   └─ Health Auto Export Pro  (REST Automation)
-       └─ Cloud Run  hae-receiver
-             └─ BigQuery  dataset `health`
+       └─ Cloud Run service  hae-receiver
+             └─ BigQuery dataset `health`
                    ├─ raw_metrics   (hourly, long form)
                    ├─ heart_rate    (per sample)
                    ├─ hrv           (per sample)
                    └─ workouts      (per event)
-                        ▲
-                        │  BigQuery MCP
-                        │  (local via .mcp.json, or
-                        │   managed https://bigquery.googleapis.com/mcp)
-                     Claude — Code, iPhone, Claude.ai
+
+Claude — Code, iPhone, Claude.ai
+  └─ BigQuery MCP (local .mcp.json or managed https://bigquery.googleapis.com/mcp)
 ```
 
 Ask *"how is my HRV trending?"* from Claude on your phone. Cost for a
@@ -53,6 +51,13 @@ Or just read those files directly. They're the source of truth.
   free tier has no Automations so nothing pushes in the background)
 - `gcloud`, `bq`, `node >= 20`, `bash`
 
+Asken ingestion has been split into a separate repo at `../asken-sync`.
+For the combined Asken + Apple Health table inventory and golden queries, see
+`../asken-sync/docs/bigquery-analysis-guide.md` and
+`../asken-sync/sql/golden-queries.sql`. Supabase/Postgres-only clients should
+use `../asken-sync/docs/supabase-analysis-guide.md` and
+`../asken-sync/sql/supabase-golden-queries.sql`.
+
 ## Repo layout
 
 ```
@@ -62,6 +67,8 @@ manage_health/
 │   └── skills/health-pipeline/         # the distributable skill — start here
 ├── hae-receiver/                       # Cloud Run service (TypeScript + Hono)
 ├── sql/native-ddl.sql                  # BigQuery table DDL (PROJECT placeholder)
+├── sql/sleep-ddl.sql                   # 05:00-day deduped sleep views
+├── sql/supabase-fdw.sql                # Supabase FDW facade for Silver/Gold
 ├── archive/                            # earlier experiments, not part of the live pipeline
 └── README.md
 ```

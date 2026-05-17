@@ -28,9 +28,9 @@ Federated query (FDW). No data duplication, no sync job to maintain.
 - **No new infrastructure.** No Cloud Run Job, no Scheduler entry, no
   IAM, no Dockerfile. Setup is one SQL file run in Supabase.
 - **Cost is bounded already.** BQ tables have
-  `require_partition_filter = TRUE`; every view and RPC we expose carries
-  a date predicate. ChatGPT's exploratory queries scan kilobytes-to-MB,
-  not gigabytes.
+  `require_partition_filter = TRUE`; every exposed Supabase foreign table
+  documents the required date predicate. ChatGPT's exploratory queries scan
+  kilobytes-to-MB when they keep those predicates.
 
 ## Why not just hand ChatGPT the BigQuery MCP
 
@@ -46,7 +46,8 @@ not a technical preference for Postgres.
   ... CASCADE` and the layer is gone.
 - **Good.** Always fresh — no "last synced at" caveats.
 - **Tradeoff.** Every ChatGPT query hits BQ. Mitigated by partition
-  enforcement + the `*_recent_90d` views on the BQ side.
+  enforcement and a hard rule that Supabase callers must include the
+  documented date filter.
 - **Tradeoff.** Supabase Realtime / RLS-against-userIds don't make sense
   on foreign tables. Acceptable: this is a single-user read facade for
   external LLMs, not a multi-tenant app.
@@ -54,7 +55,7 @@ not a technical preference for Postgres.
   `location` option. If the dataset region changes, the SQL must be
   re-applied. Documented in `references/supabase-fdw.md`.
 
-## Update — partition_filter pushdown problem
+## Update — partition filter pushdown problem
 
 The first attempt put the date filter in a Supabase-side view:
 
@@ -69,8 +70,8 @@ does not always push the WHERE clause down in a form that BigQuery's
 query planner recognises as a partition-elimination predicate, so the
 job is rejected before scanning anything.
 
-**Fix:** define the windowing view on the **BigQuery side**, where
-`CURRENT_DATE()` is evaluated by BQ at query-plan time:
+The temporary fix was to define bounded-window views on the **BigQuery side**,
+where `CURRENT_DATE()` is evaluated by BQ at query-plan time:
 
 ```sql
 CREATE OR REPLACE VIEW `PROJECT.health.heart_rate_recent_90d` AS
@@ -78,31 +79,32 @@ SELECT * FROM `PROJECT.health.heart_rate`
 WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
 ```
 
-Foreign tables in Supabase point at the `_recent_90d` views, not at the
-base tables. PostgREST sees `SELECT * FROM bq_health.heart_rate_recent`
-with no WHERE clause and the FDW just generates `SELECT * FROM
-…heart_rate_recent_90d` against BQ; the date predicate is already inside
-the view definition. Partition pruning works, `require_partition_filter`
-is satisfied.
+That proved partition pruning works when the predicate is visible to BigQuery,
+but it created a second set of compatibility views and hid all history older
+than the window.
 
-Same idea: keep the work BigQuery does well (partition pruning) on
-BigQuery's side, and treat the FDW as a transport — not a query
-optimiser.
+**Current fix:** remove all `_recent` / `*_recent_90d` compatibility objects
+and expose only the canonical Silver/Gold BigQuery objects as Supabase
+foreign tables. Every query carries its own bounded date predicate. If the FDW
+cannot push a required predicate down, the caller should use BigQuery MCP/CLI
+directly instead of recreating recent-window views.
+
+This keeps the FDW as a thin transport and leaves the source-of-truth model
+simple: Bronze is BigQuery-only, Silver/Gold is available through both
+BigQuery and Supabase.
 
 ## Update — ChatGPT introspection misses views
 
-ChatGPT's Supabase connector enumerates `public` via something close to
-`information_schema.tables` filtered to `BASE TABLE`, so the four
-foreign-backed views (`*_recent`) are invisible to it. The connector
-reports `public tables: []` even when the views exist and return rows
-under direct SQL.
+ChatGPT's Supabase connector can miss foreign-backed objects during
+introspection. In one tested state it reported `public tables: []` even when
+the foreign tables existed and returned rows under direct SQL.
 
 Two responses considered:
 
-- **Stay on FDW, name the views explicitly.** Tested live: ChatGPT
-  runs `SELECT … FROM public.hrv_recent` correctly when given the table
-  name in the chat. Persisting that hint in ChatGPT's Custom
-  Instructions makes the workaround zero-friction afterward.
+- **Stay on FDW, name the foreign tables explicitly.** Tested live:
+  direct SQL against `public.hrv_dedup`, `public.raw_metrics_dedup`, and the
+  other documented names returns rows. Persisting the table inventory in agent
+  docs makes the workaround zero-friction afterward.
 - **Materialize into native Supabase tables.** A Cloud Run Job pulls
   fresh rows from BQ and UPSERTs into vanilla `public.*` tables on a
   schedule. Heavier (watermark management, secret distribution,
@@ -111,10 +113,9 @@ Two responses considered:
 
 **Decided:** the explicit-name workaround is sufficient for the current
 single-user, single-connector scope. The materialization path is the
-documented escape hatch if a future tool can't be coaxed by a chat
-hint. See `archive/supabase-fdw-iteration/README.md` for the full
-narrative and `references/supabase-fdw.md` §8 for the Custom
-Instructions block.
+documented escape hatch if a future tool cannot query foreign tables by direct
+SQL. See `archive/supabase-fdw-iteration/README.md` for the full narrative
+and `references/supabase-fdw.md` for the current table inventory.
 
 ## Update — auth model
 
