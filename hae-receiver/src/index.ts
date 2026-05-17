@@ -137,6 +137,7 @@ app.post('/', async (c) => {
     return c.json({ error: 'missing data field' }, 400);
   }
 
+  const ingestedAt = new Date().toISOString();
   const rowsByTable: Record<string, { insertId: string; json: any }[]> = {
     heart_rate: [],
     hrv: [],
@@ -159,14 +160,14 @@ app.post('/', async (c) => {
         if (bpm == null) continue;
         rowsByTable.heart_rate.push({
           insertId: insertId(['heart_rate', iso, pt.source]),
-          json: { start_at: iso, bpm: Number(bpm), source: pt.source ?? null },
+          json: { start_at: iso, bpm: Number(bpm), source: pt.source ?? null, ingested_at: ingestedAt },
         });
       } else if (name === 'heart_rate_variability') {
         const sdnn = pt.qty ?? pt.sdnn ?? pt.SDNN;
         if (sdnn == null) continue;
         rowsByTable.hrv.push({
           insertId: insertId(['hrv', iso, pt.source]),
-          json: { start_at: iso, sdnn: Number(sdnn), source: pt.source ?? null },
+          json: { start_at: iso, sdnn: Number(sdnn), source: pt.source ?? null, ingested_at: ingestedAt },
         });
       } else {
         // 汎用 metric を long 形式で格納
@@ -180,6 +181,7 @@ app.post('/', async (c) => {
             value: Number(value),
             unit,
             source: pt.source ?? null,
+            ingested_at: ingestedAt,
           },
         });
       }
@@ -211,6 +213,7 @@ app.post('/', async (c) => {
         distance_km: unwrapQty(w.totalDistance),
         avg_hr: unwrapQty(w.avgHeartRate),
         source: w.source ?? null,
+        ingested_at: ingestedAt,
       },
     });
   }
@@ -252,6 +255,22 @@ app.post('/', async (c) => {
       return c.json({ error: 'bq insert failed', table, detail, partial: summary }, 500);
     }
   }
+
+  const metricSummary = (payload.data.metrics ?? [])
+    .map((m) => `${m.name}:${m.data?.length ?? 0}`)
+    .sort();
+  const workoutKeys = Array.from(
+    new Set((payload.data.workouts ?? []).flatMap((w) => Object.keys(w))),
+  ).sort();
+  console.log(
+    '[hae-receiver] POST ok',
+    JSON.stringify({
+      metrics: metricSummary,
+      workouts: payload.data.workouts?.length ?? 0,
+      workout_keys: workoutKeys,
+      inserted: summary,
+    }),
+  );
 
   return c.json({ ok: true, inserted: summary });
 });
