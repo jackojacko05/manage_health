@@ -137,6 +137,12 @@ normalized AS (
         AND raw_value <= 1 THEN raw_value * 100
       WHEN metric_name = 'apple_stand_hour'
         AND (raw_value = 3600 OR raw_unit IS NULL OR raw_unit = '') THEN IF(raw_value = 0, 0, 1)
+      WHEN metric_name = 'sleep_analysis'
+        AND LOWER(raw_unit) IN ('hr', 'hour', 'hours')
+        AND raw_value <= 24 THEN raw_value * 3600
+      WHEN metric_name = 'sleep_analysis'
+        AND LOWER(raw_unit) IN ('min', 'minute', 'minutes')
+        AND raw_value <= 24 * 60 THEN raw_value * 60
       ELSE raw_value
     END AS value,
     CASE
@@ -144,6 +150,7 @@ normalized AS (
       WHEN metric_name = 'height' THEN 'm'
       WHEN metric_name IN ('body_fat_percentage', 'blood_oxygen_saturation') THEN '%'
       WHEN metric_name = 'apple_stand_hour' THEN 'count'
+      WHEN metric_name = 'sleep_analysis' THEN 's'
       WHEN metric_name = 'vo2_max' THEN 'ml/(kg·min)'
       ELSE raw_unit
     END AS unit,
@@ -162,6 +169,7 @@ filtered AS (
     AND (metric_name != 'weight_body_mass' OR value BETWEEN 20 AND 300)
     AND (metric_name != 'vo2_max' OR value BETWEEN 1 AND 100)
     AND (metric_name != 'respiratory_rate' OR value BETWEEN 5 AND 60)
+    AND (metric_name != 'sleep_analysis' OR value BETWEEN 1 AND 36 * 3600)
 )
 SELECT metric_name, ts, value, unit, source, ingested_at
 FROM filtered

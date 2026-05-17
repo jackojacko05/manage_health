@@ -289,7 +289,7 @@ app.post('/', async (c) => {
             metric_name: name,
             ts: iso,
             value: Number(value),
-            unit,
+            unit: name === 'sleep_analysis' ? 's' : unit,
             source: pt.source ?? null,
             ingested_at: ingestedAt,
           },

@@ -20,7 +20,7 @@ WITH segments AS (
     ts AS segment_start,
     TIMESTAMP_ADD(ts, INTERVAL CAST(ROUND(value) AS INT64) SECOND) AS segment_end,
     value AS raw_seconds
-  FROM `__PROJECT__.health.raw_metrics`
+  FROM `__PROJECT__.health.raw_metrics_dedup`
   WHERE DATE(ts) BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
     AND metric_name = 'sleep_analysis'
     AND value IS NOT NULL
