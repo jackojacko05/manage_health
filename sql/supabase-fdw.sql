@@ -9,8 +9,9 @@
 --        __GCP_PROJECT_ID__ -> GCP project id
 --        __BQ_LOCATION__    -> BigQuery dataset region, e.g. asia-northeast1
 --
--- Supabase exposes only Silver/Gold BigQuery objects. Bronze/raw tables stay
--- BigQuery-only. No bounded-window compatibility objects are created.
+-- Supabase syncs/exposes every BigQuery Silver and Gold object through FDW.
+-- Bronze/raw tables stay BigQuery-only. No bounded-window compatibility
+-- objects are created.
 --
 -- Important: partition filters are the caller's responsibility. For objects
 -- backed by partitioned BigQuery tables, queries must include the documented
@@ -130,6 +131,21 @@ CREATE FOREIGN TABLE public.sleep_daily_sources (
 
 COMMENT ON FOREIGN TABLE public.sleep_daily_sources IS
   'Silver BigQuery FDW table. Filter sleep_date for bounded analysis; contains one row per sleep_date and HealthKit source before source selection.';
+
+CREATE FOREIGN TABLE public.asken_foods_effective (
+  date         date,
+  division     text,
+  name         text,
+  quantity     text,
+  calories     double precision,
+  food_hash    text,
+  ingested_at  timestamp
+)
+  SERVER bigquery_server
+  OPTIONS (table 'asken_foods_effective', location '__BQ_LOCATION__');
+
+COMMENT ON FOREIGN TABLE public.asken_foods_effective IS
+  'Silver BigQuery FDW table. Queries must include WHERE date BETWEEN ... when using Supabase; deduped food-item rows for food-level Asken analysis.';
 
 CREATE FOREIGN TABLE public.asken_meals_effective (
   date         date,
@@ -291,6 +307,7 @@ GRANT SELECT ON
   public.hrv_dedup,
   public.workouts_dedup,
   public.sleep_daily_sources,
+  public.asken_foods_effective,
   public.asken_meals_effective,
   public.sleep_daily,
   public.hrv_regression_data,
@@ -304,6 +321,7 @@ REVOKE SELECT ON
   public.hrv_dedup,
   public.workouts_dedup,
   public.sleep_daily_sources,
+  public.asken_foods_effective,
   public.asken_meals_effective,
   public.sleep_daily,
   public.hrv_regression_data,

@@ -31,6 +31,7 @@ invalid values are filtered at the Bronze -> Silver boundary.
 | Silver | `hrv_dedup` | Deduped HRV sample | `DATE(start_at)` |
 | Silver | `workouts_dedup` | Deduped workout event | `DATE(start_at)` |
 | Silver | `sleep_daily_sources` | Sleep day + source | `sleep_date` |
+| Silver | `asken_foods_effective` | Deduped Asken food item | `date` |
 | Silver | `asken_meals_effective` | Meal summary with snack remainder | `date` |
 | Gold | `sleep_daily` | Daily sleep, 05:00 JST boundary | `sleep_date` |
 | Gold | `hrv_regression_data` | HRV analysis features | `date` |
@@ -53,6 +54,12 @@ GROUP BY jst_date;
 ```sql
 SELECT date, division, calories, protein_g, fat_g, carbs_g
 FROM `PROJECT_ID.health.asken_meals_effective`
+WHERE date BETWEEN DATE '2026-04-01' AND DATE '2026-04-30';
+```
+
+```sql
+SELECT date, division, name, quantity, calories
+FROM `PROJECT_ID.health.asken_foods_effective`
 WHERE date BETWEEN DATE '2026-04-01' AND DATE '2026-04-30';
 ```
 
@@ -84,6 +91,9 @@ Use Silver objects for analysis unless you are explicitly auditing raw ingest.
 - `workouts_dedup` normalizes post-2026-04-20 localized activity labels to the
   English labels used by older data. It prefers rows with richer kcal, distance,
   HR, and source fields.
+- `asken_foods_effective` dedupes Asken food rows to the latest valid
+  date/division/food_hash row. Use it for food-item analysis instead of Bronze
+  `asken_foods`.
 
 ## Known Sync Status
 
@@ -104,14 +114,16 @@ Current data audit notes, based on all-period BigQuery checks:
 
 ## Supabase FDW
 
-Supabase exposes only Silver/Gold objects from `sql/supabase-fdw.sql`. Bronze
-raw tables stay BigQuery-only. Supabase callers must include the same required
-date filters shown above. Descriptions/comments on BigQuery and Supabase
-objects repeat the partition rule so context-less agents can discover it.
+Supabase syncs/exposes every BigQuery Silver and Gold object from
+`sql/supabase-fdw.sql`. Bronze raw tables stay BigQuery-only. Supabase callers
+must include the same required date filters shown above. Descriptions/comments
+on BigQuery and Supabase objects repeat the partition rule so context-less
+agents can discover it.
 
 Do not add bounded-window Supabase objects. The minimal shape is:
 
 - Silver: `raw_metrics_dedup`, `heart_rate_dedup`, `hrv_dedup`,
-  `workouts_dedup`, `sleep_daily_sources`, `asken_meals_effective`
+  `workouts_dedup`, `sleep_daily_sources`, `asken_foods_effective`,
+  `asken_meals_effective`
 - Gold: `sleep_daily`, `hrv_regression_data`, `hrv_regression_v2`,
   `hrv_seg_v3`

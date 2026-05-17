@@ -52,6 +52,9 @@ Or just read those files directly. They're the source of truth.
 - `gcloud`, `bq`, `node >= 20`, `bash`
 
 Asken ingestion has been split into a separate repo at `../asken-sync`.
+For the combined Asken + Apple Health table inventory and golden queries, see
+`../asken-sync/docs/bigquery-analysis-guide.md` and
+`../asken-sync/sql/golden-queries.sql`.
 
 ## Repo layout
 
