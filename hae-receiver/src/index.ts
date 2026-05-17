@@ -110,8 +110,17 @@ function unitLower(unit?: string): string {
 
 function secondsFromMeasurement(measurement: { value: number; unit?: string }): number {
   const unit = unitLower(measurement.unit);
+  if (unit === 's' || unit === 'sec' || unit === 'second' || unit === 'seconds') return measurement.value;
   if (unit === 'hr' || unit === 'hour' || unit === 'hours') return measurement.value * 3600;
   if (unit === 'min' || unit === 'minute' || unit === 'minutes') return measurement.value * 60;
+  return measurement.value;
+}
+
+function sleepSecondsFromMeasurement(measurement: { value: number; unit?: string }, fallbackUnit: string): number {
+  const unit = unitLower(measurement.unit ?? fallbackUnit);
+  if (unit) return secondsFromMeasurement({ value: measurement.value, unit });
+  if (measurement.value <= 24) return measurement.value * 3600;
+  if (measurement.value <= 24 * 60) return measurement.value * 60;
   return measurement.value;
 }
 
@@ -130,11 +139,23 @@ function kmFromMeasurement(measurement: { value: number; unit?: string } | null)
 }
 
 function metricValue(name: string, unit: string, pt: HaePoint, iso: string): number | null {
-  const direct = firstMeasurement(pt.qty, pt.value, pt.sum, pt.total, pt.Avg, pt.avg, pt.average, pt.duration);
+  const direct = firstMeasurement(
+    pt.qty,
+    pt.value,
+    pt.sum,
+    pt.total,
+    pt.totalSleep,
+    pt.asleep,
+    pt.inBed,
+    pt.Avg,
+    pt.avg,
+    pt.average,
+    pt.duration,
+  );
   if (name === 'sleep_analysis') {
-    if (direct) return secondsFromMeasurement({ value: direct.value, unit: direct.unit ?? unit });
+    if (direct) return sleepSecondsFromMeasurement(direct, unit);
 
-    const endIso = toIso(pt.end ?? pt.endDate ?? pt.finish ?? pt.to ?? '');
+    const endIso = toIso(pt.end ?? pt.endDate ?? pt.finish ?? pt.to ?? pt.sleepEnd ?? pt.inBedEnd ?? '');
     if (!endIso) return null;
 
     const seconds = (new Date(endIso).getTime() - new Date(iso).getTime()) / 1000;
@@ -144,6 +165,13 @@ function metricValue(name: string, unit: string, pt: HaePoint, iso: string): num
   return direct?.value ?? null;
 }
 
+function metricIso(name: string, pt: HaePoint): string | null {
+  if (name === 'sleep_analysis') {
+    return toIso(pt.sleepStart ?? pt.inBedStart ?? pt.date ?? '');
+  }
+  return toIso(pt.date);
+}
+
 // ---- Payload の型定義 (HAE JSON) ----
 interface HaePoint {
   date: string;
@@ -151,6 +179,13 @@ interface HaePoint {
   endDate?: string;
   finish?: string;
   to?: string;
+  sleepStart?: string;
+  sleepEnd?: string;
+  inBedStart?: string;
+  inBedEnd?: string;
+  totalSleep?: any;
+  asleep?: any;
+  inBed?: any;
   qty?: number;
   source?: string;
   // HRV や HR に複数 fields がある場合、qty 以外の数値フィールド
@@ -225,7 +260,7 @@ app.post('/', async (c) => {
     const name = metric.name;
     const unit = metric.units ?? '';
     for (const pt of metric.data ?? []) {
-      const iso = toIso(pt.date);
+      const iso = metricIso(name, pt);
       if (!iso) continue;
 
       if (name === 'heart_rate') {

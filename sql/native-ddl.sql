@@ -220,6 +220,7 @@ WITH normalized AS (
       WHEN '屋外 サイクリング' THEN 'Cycling'
       WHEN '柔軟性' THEN 'Flexibility'
       WHEN 'クールダウン' THEN 'Cooldown'
+      WHEN '機能的筋力トレーニング' THEN 'StrengthTraining'
       ELSE activity_type
     END AS activity_type,
     duration_min,
