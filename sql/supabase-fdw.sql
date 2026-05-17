@@ -95,6 +95,23 @@ CREATE FOREIGN TABLE public.hrv_dedup (
 COMMENT ON FOREIGN TABLE public.hrv_dedup IS
   'Silver BigQuery FDW table. Queries must include WHERE DATE(start_at) BETWEEN ... when using Supabase; if the FDW cannot push the filter down, use BigQuery directly.';
 
+CREATE FOREIGN TABLE public.workouts_dedup (
+  start_at       timestamp,
+  end_at         timestamp,
+  activity_type  text,
+  duration_min   double precision,
+  total_kcal     double precision,
+  distance_km    double precision,
+  avg_hr         double precision,
+  source         text,
+  ingested_at    timestamp
+)
+  SERVER bigquery_server
+  OPTIONS (table 'workouts_dedup', location '__BQ_LOCATION__');
+
+COMMENT ON FOREIGN TABLE public.workouts_dedup IS
+  'Silver BigQuery FDW table. Queries must include WHERE DATE(start_at) BETWEEN ... when using Supabase; localized activity labels are normalized and invalid workout rows are filtered.';
+
 CREATE FOREIGN TABLE public.sleep_daily_sources (
   sleep_date           date,
   window_start         timestamp,
@@ -272,6 +289,7 @@ GRANT SELECT ON
   public.raw_metrics_dedup,
   public.heart_rate_dedup,
   public.hrv_dedup,
+  public.workouts_dedup,
   public.sleep_daily_sources,
   public.asken_meals_effective,
   public.sleep_daily,
@@ -284,6 +302,7 @@ REVOKE SELECT ON
   public.raw_metrics_dedup,
   public.heart_rate_dedup,
   public.hrv_dedup,
+  public.workouts_dedup,
   public.sleep_daily_sources,
   public.asken_meals_effective,
   public.sleep_daily,

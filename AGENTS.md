@@ -10,6 +10,10 @@ There are no active bounded-window compatibility views. Do not recreate them.
 If a Supabase FDW query cannot push a required date filter to BigQuery, use
 BigQuery MCP/CLI directly.
 
+Silver views treat the HAE format observed from 2026-04-20 onward as
+canonical. Older rows are normalized forward where possible, and obvious
+invalid values are filtered at the Bronze -> Silver boundary.
+
 | Layer | Object | Grain | Required filter |
 |---|---|---|---|
 | Bronze | `raw_metrics` | HAE metric sample/bucket | `DATE(ts)` |
@@ -25,6 +29,7 @@ BigQuery MCP/CLI directly.
 | Silver | `raw_metrics_dedup` | Deduped HAE metric sample/bucket | `DATE(ts)` |
 | Silver | `heart_rate_dedup` | Deduped heart-rate sample | `DATE(start_at)` |
 | Silver | `hrv_dedup` | Deduped HRV sample | `DATE(start_at)` |
+| Silver | `workouts_dedup` | Deduped workout event | `DATE(start_at)` |
 | Silver | `sleep_daily_sources` | Sleep day + source | `sleep_date` |
 | Silver | `asken_meals_effective` | Meal summary with snack remainder | `date` |
 | Gold | `sleep_daily` | Daily sleep, 05:00 JST boundary | `sleep_date` |
@@ -57,6 +62,39 @@ FROM `PROJECT_ID.health.sleep_daily`
 WHERE sleep_date BETWEEN DATE '2026-04-01' AND DATE '2026-04-30';
 ```
 
+## Silver Normalization
+
+Use Silver objects for analysis unless you are explicitly auditing raw ingest.
+
+- `raw_metrics_dedup` normalizes legacy metric aliases to 2026-04-20+ names:
+  `stair_speed_up`, `stair_speed_down`,
+  `six_minute_walking_test_distance`.
+- Energy metrics are canonicalized to `kJ`; convert to kcal with
+  `value / 4.184` in queries.
+- `height` is canonicalized to meters, body fat and blood oxygen to percent
+  points, `apple_stand_hour` to `count`, and `vo2_max` to `ml/(kg·min)`.
+- Invalid/null analytical values are filtered from Silver, including implausible
+  BMI, body fat, blood oxygen, height, body mass, HR, HRV, workout duration,
+  workout distance, workout kcal, and workout average HR.
+- `workouts_dedup` normalizes post-2026-04-20 localized activity labels to the
+  English labels used by older data. It keeps rows with missing `total_kcal`
+  because the current HAE workout sync is not sending that field.
+
+## Known Sync Status
+
+Current data audit notes, based on all-period BigQuery checks:
+
+- Sleep ingest stopped after 2026-04-19. `raw_metrics.sleep_analysis` and
+  `sleep_daily` currently have no rows from 2026-04-20 onward.
+- Workout ingest still sends events after 2026-04-20, but `total_kcal` and
+  `source` are missing and activity labels are localized. Silver normalizes the
+  labels and dedupes rows, but cannot reconstruct missing kcal/source.
+- HRV analysis Gold tables (`hrv_regression_data`, `hrv_regression_v2`,
+  `hrv_seg_v3`) are stale after 2026-04-20 and should be regenerated before
+  using them for current analysis.
+- HealthKit `dietary_energy` became sparse after 2026-04-20; use Asken
+  nutrition tables as the food/calorie source of truth.
+
 ## Supabase FDW
 
 Supabase exposes only Silver/Gold objects from `sql/supabase-fdw.sql`. Bronze
@@ -67,6 +105,6 @@ objects repeat the partition rule so context-less agents can discover it.
 Do not add bounded-window Supabase objects. The minimal shape is:
 
 - Silver: `raw_metrics_dedup`, `heart_rate_dedup`, `hrv_dedup`,
-  `sleep_daily_sources`, `asken_meals_effective`
+  `workouts_dedup`, `sleep_daily_sources`, `asken_meals_effective`
 - Gold: `sleep_daily`, `hrv_regression_data`, `hrv_regression_v2`,
   `hrv_seg_v3`

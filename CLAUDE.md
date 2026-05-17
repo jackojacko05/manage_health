@@ -39,9 +39,10 @@ Derived views:
 
 | View                  | Layer  | Grain             | Content                                                |
 |-----------------------|--------|-------------------|--------------------------------------------------------|
-| `raw_metrics_dedup`   | Silver | metric timestamp  | Exact dedupe over raw HAE metric rows                  |
-| `heart_rate_dedup`    | Silver | sample timestamp  | Exact dedupe over heart-rate rows                      |
-| `hrv_dedup`           | Silver | sample timestamp  | Exact dedupe over HRV rows                             |
+| `raw_metrics_dedup`   | Silver | metric timestamp  | Deduped HAE rows, normalized to 2026-04-20+ units/names |
+| `heart_rate_dedup`    | Silver | sample timestamp  | Deduped heart-rate rows with invalid BPM filtered      |
+| `hrv_dedup`           | Silver | sample timestamp  | Deduped HRV rows with invalid SDNN filtered            |
+| `workouts_dedup`      | Silver | workout event     | Deduped workouts with localized activity names normalized |
 | `sleep_daily_sources` | Silver | sleep_date+source | 05:00 JST sleep-day totals per HealthKit source        |
 | `sleep_daily`         | Gold   | sleep_date        | Deduped daily sleep, one selected source per 05:00 day |
 

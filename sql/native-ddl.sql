@@ -99,35 +99,172 @@ SET OPTIONS (
   description = 'Bronze operational ingest log. Unpartitioned; no date filter is required.'
 );
 
--- ===== Deduped Silver views =====
--- These views remove exact duplicate rows. They intentionally do not impose a
--- fixed date window. Queries through BigQuery or Supabase must still include
--- the partition filter shown in each view description.
+-- ===== Silver normalization views =====
+-- These views dedupe repeated ingest rows and absorb HAE shape drift. The
+-- canonical metric names / units follow the format observed from 2026-04-20
+-- onward. They intentionally do not impose a fixed date window. Queries through
+-- BigQuery or Supabase must still include the partition filter shown in each
+-- view description.
 CREATE OR REPLACE VIEW `__PROJECT__.health.raw_metrics_dedup` AS
-SELECT DISTINCT metric_name, ts, value, unit, source, ingested_at
-FROM `__PROJECT__.health.raw_metrics`;
+WITH renamed AS (
+  SELECT
+    CASE metric_name
+      WHEN 'stair_ascent_speed' THEN 'stair_speed_up'
+      WHEN 'stair_descent_speed' THEN 'stair_speed_down'
+      WHEN 'six_minute_walk_test_distance' THEN 'six_minute_walking_test_distance'
+      ELSE metric_name
+    END AS metric_name,
+    ts,
+    value AS raw_value,
+    unit AS raw_unit,
+    source,
+    ingested_at
+  FROM `__PROJECT__.health.raw_metrics`
+  WHERE metric_name IS NOT NULL
+    AND ts IS NOT NULL
+    AND value IS NOT NULL
+),
+normalized AS (
+  SELECT
+    metric_name,
+    ts,
+    CASE
+      WHEN metric_name IN ('active_energy', 'basal_energy_burned', 'dietary_energy')
+        AND LOWER(raw_unit) = 'kcal' THEN raw_value * 4.184
+      WHEN metric_name = 'height'
+        AND (LOWER(raw_unit) = 'cm' OR raw_value > 3) THEN raw_value / 100
+      WHEN metric_name IN ('body_fat_percentage', 'blood_oxygen_saturation')
+        AND raw_value <= 1 THEN raw_value * 100
+      WHEN metric_name = 'apple_stand_hour'
+        AND (raw_value = 3600 OR raw_unit IS NULL OR raw_unit = '') THEN IF(raw_value = 0, 0, 1)
+      ELSE raw_value
+    END AS value,
+    CASE
+      WHEN metric_name IN ('active_energy', 'basal_energy_burned', 'dietary_energy') THEN 'kJ'
+      WHEN metric_name = 'height' THEN 'm'
+      WHEN metric_name IN ('body_fat_percentage', 'blood_oxygen_saturation') THEN '%'
+      WHEN metric_name = 'apple_stand_hour' THEN 'count'
+      WHEN metric_name = 'vo2_max' THEN 'ml/(kg·min)'
+      ELSE raw_unit
+    END AS unit,
+    source,
+    ingested_at
+  FROM renamed
+),
+filtered AS (
+  SELECT *
+  FROM normalized
+  WHERE value >= 0
+    AND (metric_name != 'body_mass_index' OR value BETWEEN 10 AND 80)
+    AND (metric_name != 'body_fat_percentage' OR value BETWEEN 1 AND 80)
+    AND (metric_name != 'blood_oxygen_saturation' OR value BETWEEN 50 AND 100)
+    AND (metric_name != 'height' OR value BETWEEN 0.5 AND 2.5)
+    AND (metric_name != 'weight_body_mass' OR value BETWEEN 20 AND 300)
+    AND (metric_name != 'vo2_max' OR value BETWEEN 1 AND 100)
+    AND (metric_name != 'respiratory_rate' OR value BETWEEN 5 AND 60)
+)
+SELECT metric_name, ts, value, unit, source, ingested_at
+FROM filtered
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY metric_name, ts, FORMAT('%g', value), unit, source
+  ORDER BY ingested_at DESC
+) = 1;
 
 ALTER VIEW `__PROJECT__.health.raw_metrics_dedup`
 SET OPTIONS (
-  description = 'Silver deduped HAE metrics. Always filter DATE(ts) when querying directly or through Supabase.'
+  description = 'Silver normalized HAE metrics. Canonical names/units follow the 2026-04-20+ HAE format, invalid values are filtered, and duplicate ingests are collapsed. Always filter DATE(ts) when querying directly or through Supabase.'
 );
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.hrv_dedup` AS
-SELECT DISTINCT start_at, sdnn, source, ingested_at
-FROM `__PROJECT__.health.hrv`;
+SELECT start_at, sdnn, source, ingested_at
+FROM `__PROJECT__.health.hrv`
+WHERE start_at IS NOT NULL
+  AND sdnn > 0
+  AND sdnn <= 300
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY start_at, FORMAT('%g', sdnn), source
+  ORDER BY ingested_at DESC
+) = 1;
 
 ALTER VIEW `__PROJECT__.health.hrv_dedup`
 SET OPTIONS (
-  description = 'Silver deduped HRV samples. Always filter DATE(start_at) when querying directly or through Supabase.'
+  description = 'Silver deduped HRV samples. Invalid SDNN values are filtered. Always filter DATE(start_at) when querying directly or through Supabase.'
 );
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.heart_rate_dedup` AS
-SELECT DISTINCT start_at, bpm, source, ingested_at
-FROM `__PROJECT__.health.heart_rate`;
+SELECT start_at, bpm, source, ingested_at
+FROM `__PROJECT__.health.heart_rate`
+WHERE start_at IS NOT NULL
+  AND bpm BETWEEN 30 AND 220
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY start_at, FORMAT('%g', bpm), source
+  ORDER BY ingested_at DESC
+) = 1;
 
 ALTER VIEW `__PROJECT__.health.heart_rate_dedup`
 SET OPTIONS (
-  description = 'Silver deduped heart-rate samples. Always filter DATE(start_at) when querying directly or through Supabase.'
+  description = 'Silver deduped heart-rate samples. Invalid BPM values are filtered. Always filter DATE(start_at) when querying directly or through Supabase.'
+);
+
+CREATE OR REPLACE VIEW `__PROJECT__.health.workouts_dedup` AS
+WITH normalized AS (
+  SELECT
+    start_at,
+    end_at,
+    CASE TRIM(activity_type)
+      WHEN 'ピラティス' THEN 'Pilates'
+      WHEN '屋内 歩く' THEN 'Walking'
+      WHEN '屋外 歩く' THEN 'Walking'
+      WHEN '卓球' THEN 'TableTennis'
+      WHEN 'ヨガ' THEN 'Yoga'
+      WHEN '屋外 サイクリング' THEN 'Cycling'
+      WHEN '柔軟性' THEN 'Flexibility'
+      WHEN 'クールダウン' THEN 'Cooldown'
+      ELSE activity_type
+    END AS activity_type,
+    duration_min,
+    total_kcal,
+    distance_km,
+    avg_hr,
+    source,
+    ingested_at
+  FROM `__PROJECT__.health.workouts`
+  WHERE start_at IS NOT NULL
+    AND end_at IS NOT NULL
+)
+SELECT
+  start_at,
+  end_at,
+  activity_type,
+  duration_min,
+  total_kcal,
+  distance_km,
+  avg_hr,
+  source,
+  ingested_at
+FROM normalized
+WHERE duration_min IS NOT NULL
+  AND end_at >= start_at
+  AND duration_min BETWEEN 0 AND 1440
+  AND (total_kcal IS NULL OR total_kcal BETWEEN 0 AND 5000)
+  AND (distance_km IS NULL OR distance_km BETWEEN 0 AND 500)
+  AND (avg_hr IS NULL OR avg_hr BETWEEN 30 AND 220)
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY
+    start_at,
+    end_at,
+    activity_type,
+    FORMAT('%g', duration_min),
+    FORMAT('%g', total_kcal),
+    FORMAT('%g', distance_km),
+    FORMAT('%g', avg_hr),
+    source
+  ORDER BY ingested_at DESC
+) = 1;
+
+ALTER VIEW `__PROJECT__.health.workouts_dedup`
+SET OPTIONS (
+  description = 'Silver deduped workout events. 2026-04-20+ localized activity names are normalized, invalid durations/ranges are filtered, and duplicate ingests are collapsed. Always filter DATE(start_at) when querying directly or through Supabase.'
 );
 
 -- ===== Sleep normalization views =====
