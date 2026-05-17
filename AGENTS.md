@@ -84,11 +84,15 @@ Use Silver objects for analysis unless you are explicitly auditing raw ingest.
 
 Current data audit notes, based on all-period BigQuery checks:
 
-- Sleep ingest stopped after 2026-04-19. `raw_metrics.sleep_analysis` and
-  `sleep_daily` currently have no rows from 2026-04-20 onward.
-- Workout ingest still sends events after 2026-04-20, but `total_kcal` and
-  `source` are missing and activity labels are localized. Silver normalizes the
-  labels and dedupes rows, but cannot reconstruct missing kcal/source.
+- Sleep payloads include `sleep_analysis`, but older receiver revisions skipped
+  category-style sleep rows without a numeric `qty`. Revision
+  `hae-receiver-00009-854` parses sleep durations; existing 2026-04-20+
+  gaps need a manual/automatic HAE re-export with enough lookback.
+- Workout ingest still sends events after 2026-04-20. Revision
+  `hae-receiver-00009-854` parses the newer `activeEnergy*` and distance
+  workout keys; `source` may remain missing when HAE does not send it. Silver
+  normalizes localized activity labels and prefers rows with richer kcal,
+  distance, HR, and source fields.
 - HRV analysis Gold tables (`hrv_regression_data`, `hrv_regression_v2`,
   `hrv_seg_v3`) are stale after 2026-04-20 and should be regenerated before
   using them for current analysis.

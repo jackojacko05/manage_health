@@ -78,9 +78,79 @@ function insertId(parts: (string | number | undefined | null)[]): string {
   return crypto.createHash('sha1').update(key).digest('hex').slice(0, 24);
 }
 
+function unwrapMeasurement(v: any): { value: number; unit?: string } | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? { value: v } : null;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? { value: n } : null;
+  }
+  if (typeof v !== 'object') return null;
+
+  for (const key of ['qty', 'value', 'sum', 'total', 'average', 'avg', 'Avg']) {
+    const n = Number(v[key]);
+    if (Number.isFinite(n)) {
+      return { value: n, unit: v.units ?? v.unit };
+    }
+  }
+  return null;
+}
+
+function firstMeasurement(...values: any[]): { value: number; unit?: string } | null {
+  for (const value of values) {
+    const measurement = unwrapMeasurement(value);
+    if (measurement) return measurement;
+  }
+  return null;
+}
+
+function unitLower(unit?: string): string {
+  return (unit ?? '').toLowerCase();
+}
+
+function secondsFromMeasurement(measurement: { value: number; unit?: string }): number {
+  const unit = unitLower(measurement.unit);
+  if (unit === 'hr' || unit === 'hour' || unit === 'hours') return measurement.value * 3600;
+  if (unit === 'min' || unit === 'minute' || unit === 'minutes') return measurement.value * 60;
+  return measurement.value;
+}
+
+function kcalFromMeasurement(measurement: { value: number; unit?: string } | null): number | null {
+  if (!measurement) return null;
+  const unit = unitLower(measurement.unit);
+  if (unit === 'kj' || unit === 'kilojoule' || unit === 'kilojoules') return measurement.value / 4.184;
+  return measurement.value;
+}
+
+function kmFromMeasurement(measurement: { value: number; unit?: string } | null): number | null {
+  if (!measurement) return null;
+  const unit = unitLower(measurement.unit);
+  if (unit === 'm' || unit === 'meter' || unit === 'meters') return measurement.value / 1000;
+  return measurement.value;
+}
+
+function metricValue(name: string, unit: string, pt: HaePoint, iso: string): number | null {
+  const direct = firstMeasurement(pt.qty, pt.value, pt.sum, pt.total, pt.Avg, pt.avg, pt.average, pt.duration);
+  if (name === 'sleep_analysis') {
+    if (direct) return secondsFromMeasurement({ value: direct.value, unit: direct.unit ?? unit });
+
+    const endIso = toIso(pt.end ?? pt.endDate ?? pt.finish ?? pt.to ?? '');
+    if (!endIso) return null;
+
+    const seconds = (new Date(endIso).getTime() - new Date(iso).getTime()) / 1000;
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+
+  return direct?.value ?? null;
+}
+
 // ---- Payload の型定義 (HAE JSON) ----
 interface HaePoint {
   date: string;
+  end?: string;
+  endDate?: string;
+  finish?: string;
+  to?: string;
   qty?: number;
   source?: string;
   // HRV や HR に複数 fields がある場合、qty 以外の数値フィールド
@@ -100,8 +170,13 @@ interface HaeWorkout {
   duration?: number;           // minutes
   totalEnergyBurned?: number;  // kcal or kJ (HAE 設定依存)
   totalDistance?: number;      // km
+  activeEnergy?: any;
+  activeEnergyBurned?: any;
+  distance?: any;
+  walkingAndRunningDistance?: any;
   avgHeartRate?: number;
   source?: string;
+  sourceName?: string;
   [k: string]: any;
 }
 
@@ -171,7 +246,7 @@ app.post('/', async (c) => {
         });
       } else {
         // 汎用 metric を long 形式で格納
-        const value = pt.qty ?? pt.Avg ?? pt.avg;
+        const value = metricValue(name, unit, pt, iso);
         if (value == null) continue;
         rowsByTable.raw_metrics.push({
           insertId: insertId(['raw', name, iso, pt.source]),
@@ -189,30 +264,31 @@ app.post('/', async (c) => {
   }
 
   // ---- Workouts 展開 ----
-  // HAE の workout フィールドは scalar と { qty, units } オブジェクトが混在するため unwrap する
-  const unwrapQty = (v: any): number | null => {
-    if (v == null) return null;
-    if (typeof v === 'number') return v;
-    if (typeof v === 'object' && v.qty != null) return Number(v.qty);
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  };
+  // HAE の workout フィールドは scalar と { qty, units } オブジェクトが混在する。
   for (const w of payload.data.workouts ?? []) {
     const startIso = toIso(w.start ?? '');
     const endIso = toIso(w.end ?? '');
     if (!startIso || !endIso) continue;
+    const energy = firstMeasurement(w.totalEnergyBurned, w.activeEnergyBurned, w.activeEnergy);
+    const distance = firstMeasurement(w.totalDistance, w.distance, w.walkingAndRunningDistance);
+    const avgHeartRate = firstMeasurement(w.avgHeartRate, w.heartRate);
+    const source = w.source ?? w.sourceName ?? w.metadata?.source ?? w.metadata?.sourceName ?? null;
+
     rowsByTable.workouts.push({
-      insertId: insertId(['workout', startIso, w.source]),
+      insertId: insertId(['workout-v2', startIso, source, w.id]),
       json: {
         start_at: startIso,
         end_at: endIso,
         activity_type: w.name ?? null,
         // HAE は duration を秒で返す → 分に変換
-        duration_min: (() => { const s = unwrapQty(w.duration); return s == null ? null : s / 60; })(),
-        total_kcal: unwrapQty(w.totalEnergyBurned),
-        distance_km: unwrapQty(w.totalDistance),
-        avg_hr: unwrapQty(w.avgHeartRate),
-        source: w.source ?? null,
+        duration_min: (() => {
+          const duration = firstMeasurement(w.duration);
+          return duration == null ? null : secondsFromMeasurement(duration) / 60;
+        })(),
+        total_kcal: kcalFromMeasurement(energy),
+        distance_km: kmFromMeasurement(distance),
+        avg_hr: avgHeartRate?.value ?? null,
+        source,
         ingested_at: ingestedAt,
       },
     });
@@ -259,6 +335,14 @@ app.post('/', async (c) => {
   const metricSummary = (payload.data.metrics ?? [])
     .map((m) => `${m.name}:${m.data?.length ?? 0}`)
     .sort();
+  const metricKeys = Object.fromEntries(
+    (payload.data.metrics ?? [])
+      .map((m) => [
+        m.name,
+        Array.from(new Set((m.data ?? []).flatMap((pt) => Object.keys(pt)))).sort(),
+      ])
+      .sort(([a], [b]) => String(a).localeCompare(String(b))),
+  );
   const workoutKeys = Array.from(
     new Set((payload.data.workouts ?? []).flatMap((w) => Object.keys(w))),
   ).sort();
@@ -266,6 +350,7 @@ app.post('/', async (c) => {
     '[hae-receiver] POST ok',
     JSON.stringify({
       metrics: metricSummary,
+      metric_keys: metricKeys,
       workouts: payload.data.workouts?.length ?? 0,
       workout_keys: workoutKeys,
       inserted: summary,

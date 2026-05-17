@@ -254,12 +254,13 @@ QUALIFY ROW_NUMBER() OVER (
     start_at,
     end_at,
     activity_type,
-    FORMAT('%g', duration_min),
-    FORMAT('%g', total_kcal),
-    FORMAT('%g', distance_km),
-    FORMAT('%g', avg_hr),
-    source
-  ORDER BY ingested_at DESC
+    FORMAT('%g', duration_min)
+  ORDER BY
+    IF(total_kcal IS NULL, 1, 0),
+    IF(distance_km IS NULL, 1, 0),
+    IF(avg_hr IS NULL, 1, 0),
+    IF(source IS NULL, 1, 0),
+    ingested_at DESC
 ) = 1;
 
 ALTER VIEW `__PROJECT__.health.workouts_dedup`
