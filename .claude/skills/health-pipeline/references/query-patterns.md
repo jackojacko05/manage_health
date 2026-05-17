@@ -1,9 +1,10 @@
 # Query patterns
 
-All four time-series tables have `require_partition_filter = TRUE`. A query
-without a filter on the partition column is **rejected at plan time** — it
-won't even run. This is intentional: it keeps scan cost bounded no matter
-how much data accumulates.
+All four Apple Health time-series tables have `require_partition_filter = TRUE`.
+A query without a filter on the partition column is **rejected at plan time** —
+it won't even run. This is intentional: it keeps scan cost bounded no matter
+how much data accumulates. The same rule applies when querying Silver views
+that read those tables, including through Supabase FDW.
 
 | Table                 | Partition column | Filter shape                                            |
 |-----------------------|------------------|---------------------------------------------------------|
@@ -11,10 +12,17 @@ how much data accumulates.
 | `heart_rate`          | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
 | `hrv`                 | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
 | `workouts`            | `DATE(start_at)` | `WHERE DATE(start_at) BETWEEN ... AND ...`              |
+| `raw_metrics_dedup`   | `DATE(ts)`       | `WHERE DATE(ts) BETWEEN '2025-04-01' AND '2025-04-30'`  |
+| `heart_rate_dedup`    | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
+| `hrv_dedup`           | `DATE(start_at)` | `WHERE DATE(start_at) >= '2025-04-01'`                  |
 
 `ingest_log` is unpartitioned — no filter needed.
 
 Asken query patterns live in the separate repo `../asken-sync`.
+
+There are no active `*_recent_90d` views. Do not recreate recent-window views;
+if Supabase FDW cannot push a required filter down to BigQuery, query through
+BigQuery MCP/CLI directly.
 
 ## Time zone
 
@@ -37,7 +45,9 @@ need exact local-date boundaries.
 
 | Question                                    | Table(s)                          |
 |---------------------------------------------|-----------------------------------|
-| Steps / energy / sleep / body mass trends   | `raw_metrics` (filter `metric_name`) |
+| Steps / energy / body mass trends           | `raw_metrics` (filter `metric_name`) |
+| Daily sleep without source double-counting  | `sleep_daily`                       |
+| Sleep source diagnostics                    | `sleep_daily_sources`               |
 | Resting HR, HR zones, HR during a workout   | `heart_rate`                      |
 | HRV (SDNN) trend                            | `hrv`                             |
 | Workout summary / distance / kcal per event | `workouts`                        |
@@ -75,6 +85,22 @@ ORDER BY d;
 ```
 
 `raw_metrics` is already hourly-aggregated, so `SUM` re-aggregates to daily.
+
+### Deduped sleep per 05:00 day
+
+Use `sleep_daily` for sleep trend analysis. Do not sum
+`raw_metrics.metric_name = 'sleep_analysis'` directly, because Apple Watch,
+Pokemon Sleep, AutoSleep, and other sources can overlap on the same night.
+
+`sleep_daily` uses a 05:00 JST sleep-day boundary and selects one source per
+day. Source diagnostics remain available in `sleep_daily_sources`.
+
+```sql
+SELECT sleep_date, sleep_hours, selected_source, candidate_sources
+FROM `PROJECT.health.sleep_daily`
+WHERE sleep_date >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL 30 DAY)
+ORDER BY sleep_date DESC;
+```
 
 ### Workouts this month
 

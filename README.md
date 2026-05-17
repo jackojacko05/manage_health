@@ -62,6 +62,7 @@ manage_health/
 │   └── skills/health-pipeline/         # the distributable skill — start here
 ├── hae-receiver/                       # Cloud Run service (TypeScript + Hono)
 ├── sql/native-ddl.sql                  # BigQuery table DDL (PROJECT placeholder)
+├── sql/sleep-ddl.sql                   # 05:00-day deduped sleep views
 ├── archive/                            # earlier experiments, not part of the live pipeline
 └── README.md
 ```

@@ -24,16 +24,30 @@ Start there. The skill indexes:
 
 ## Active tables (BigQuery dataset `health`)
 
-| Table                 | Partition on      | Content                                                   |
-|-----------------------|-------------------|-----------------------------------------------------------|
-| `raw_metrics`         | `DATE(ts)`        | Hourly-aggregated HAE metrics (long form)                 |
-| `heart_rate`          | `DATE(start_at)`  | Per-sample HR                                             |
-| `hrv`                 | `DATE(start_at)`  | Per-sample HRV (SDNN)                                     |
-| `workouts`            | `DATE(start_at)`  | One row per workout event                                 |
-| `ingest_log`          | —                 | Batch-load bookkeeping                                    |
+See `AGENTS.md` for the full Medallion inventory across Apple Health and
+Asken. The Apple Health Bronze tables are:
 
-All time-series tables have `require_partition_filter = TRUE`.
-Queries **must** filter on the partition column.
+| Table         | Partition on      | Content                                   |
+|---------------|-------------------|-------------------------------------------|
+| `raw_metrics` | `DATE(ts)`        | Hourly-aggregated HAE metrics (long form) |
+| `heart_rate`  | `DATE(start_at)`  | Per-sample HR                             |
+| `hrv`         | `DATE(start_at)`  | Per-sample HRV (SDNN)                     |
+| `workouts`    | `DATE(start_at)`  | One row per workout event                 |
+| `ingest_log`  | —                 | Batch-load bookkeeping                    |
+
+Derived views:
+
+| View                  | Layer  | Grain             | Content                                                |
+|-----------------------|--------|-------------------|--------------------------------------------------------|
+| `raw_metrics_dedup`   | Silver | metric timestamp  | Exact dedupe over raw HAE metric rows                  |
+| `heart_rate_dedup`    | Silver | sample timestamp  | Exact dedupe over heart-rate rows                      |
+| `hrv_dedup`           | Silver | sample timestamp  | Exact dedupe over HRV rows                             |
+| `sleep_daily_sources` | Silver | sleep_date+source | 05:00 JST sleep-day totals per HealthKit source        |
+| `sleep_daily`         | Gold   | sleep_date        | Deduped daily sleep, one selected source per 05:00 day |
+
+All time-series tables have `require_partition_filter = TRUE`. Queries,
+including Supabase FDW queries, **must** filter on the partition column.
+There are no active bounded-window compatibility views.
 
 ## Active Cloud Run resources
 
