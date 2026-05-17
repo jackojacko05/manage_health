@@ -127,3 +127,9 @@ Do not add bounded-window Supabase objects. The minimal shape is:
   `asken_meals_effective`
 - Gold: `sleep_daily`, `hrv_regression_data`, `hrv_regression_v2`,
   `hrv_seg_v3`
+
+Supabase/Postgres-only clients should use
+`../asken-sync/docs/supabase-analysis-guide.md` and
+`../asken-sync/sql/supabase-golden-queries.sql`. BigQuery clients should use
+`../asken-sync/docs/bigquery-analysis-guide.md` and
+`../asken-sync/sql/golden-queries.sql`.

@@ -54,7 +54,9 @@ Or just read those files directly. They're the source of truth.
 Asken ingestion has been split into a separate repo at `../asken-sync`.
 For the combined Asken + Apple Health table inventory and golden queries, see
 `../asken-sync/docs/bigquery-analysis-guide.md` and
-`../asken-sync/sql/golden-queries.sql`.
+`../asken-sync/sql/golden-queries.sql`. Supabase/Postgres-only clients should
+use `../asken-sync/docs/supabase-analysis-guide.md` and
+`../asken-sync/sql/supabase-golden-queries.sql`.
 
 ## Repo layout
 
