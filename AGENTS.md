@@ -72,7 +72,8 @@ Use Silver objects for analysis unless you are explicitly auditing raw ingest.
 - Energy metrics are canonicalized to `kJ`; convert to kcal with
   `value / 4.184` in queries.
 - `height` is canonicalized to meters, body fat and blood oxygen to percent
-  points, `apple_stand_hour` to `count`, and `vo2_max` to `ml/(kg·min)`.
+  points, walking percentage metrics to percent points, `apple_stand_hour` to
+  `count`, and `vo2_max` to `ml/(kg·min)`.
 - Invalid/null analytical values are filtered from Silver, including implausible
   BMI, body fat, blood oxygen, height, body mass, HR, HRV, workout duration,
   workout distance, workout kcal, and workout average HR.

@@ -133,7 +133,13 @@ normalized AS (
         AND LOWER(raw_unit) = 'kcal' THEN raw_value * 4.184
       WHEN metric_name = 'height'
         AND (LOWER(raw_unit) = 'cm' OR raw_value > 3) THEN raw_value / 100
-      WHEN metric_name IN ('body_fat_percentage', 'blood_oxygen_saturation')
+      WHEN metric_name IN (
+          'apple_walking_steadiness',
+          'body_fat_percentage',
+          'blood_oxygen_saturation',
+          'walking_asymmetry_percentage',
+          'walking_double_support_percentage'
+        )
         AND raw_value <= 1 THEN raw_value * 100
       WHEN metric_name = 'apple_stand_hour'
         AND (raw_value = 3600 OR raw_unit IS NULL OR raw_unit = '') THEN IF(raw_value = 0, 0, 1)
@@ -148,7 +154,13 @@ normalized AS (
     CASE
       WHEN metric_name IN ('active_energy', 'basal_energy_burned', 'dietary_energy') THEN 'kJ'
       WHEN metric_name = 'height' THEN 'm'
-      WHEN metric_name IN ('body_fat_percentage', 'blood_oxygen_saturation') THEN '%'
+      WHEN metric_name IN (
+        'apple_walking_steadiness',
+        'body_fat_percentage',
+        'blood_oxygen_saturation',
+        'walking_asymmetry_percentage',
+        'walking_double_support_percentage'
+      ) THEN '%'
       WHEN metric_name = 'apple_stand_hour' THEN 'count'
       WHEN metric_name = 'sleep_analysis' THEN 's'
       WHEN metric_name = 'vo2_max' THEN 'ml/(kg·min)'
@@ -165,6 +177,9 @@ filtered AS (
     AND (metric_name != 'body_mass_index' OR value BETWEEN 10 AND 80)
     AND (metric_name != 'body_fat_percentage' OR value BETWEEN 1 AND 80)
     AND (metric_name != 'blood_oxygen_saturation' OR value BETWEEN 50 AND 100)
+    AND (metric_name != 'apple_walking_steadiness' OR value BETWEEN 0 AND 100)
+    AND (metric_name != 'walking_asymmetry_percentage' OR value BETWEEN 0 AND 100)
+    AND (metric_name != 'walking_double_support_percentage' OR value BETWEEN 0 AND 100)
     AND (metric_name != 'height' OR value BETWEEN 0.5 AND 2.5)
     AND (metric_name != 'weight_body_mass' OR value BETWEEN 20 AND 300)
     AND (metric_name != 'vo2_max' OR value BETWEEN 1 AND 100)
