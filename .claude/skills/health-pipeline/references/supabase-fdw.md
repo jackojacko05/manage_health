@@ -1,31 +1,31 @@
-# Read BigQuery from Supabase (and ChatGPT) via FDW
+# Read BigQuery from Supabase via FDW
 
-Goal: query the same `health` BigQuery dataset from Supabase's PostgREST
-API — primarily so external Postgres-aware tools (e.g. **ChatGPT's
-Supabase connector**) can hit it without any data duplication or sync
-job.
+Goal: query the same `health` BigQuery dataset from Supabase/Postgres-aware
+tools without duplicating data or running a sync job.
 
-Approach: Supabase's `wrappers` extension provides a **BigQuery Foreign
-Data Wrapper (FDW)**. Foreign tables in Supabase point at **recent-90d
-views defined on the BigQuery side**, where the date predicate is
-evaluated by BigQuery itself and partition-pruning works under
-`require_partition_filter = TRUE`. Auth is `authenticated`-only:
-ChatGPT signs in to your Supabase project with email + password, no
-data is reachable through the publishable / anon key alone.
+Approach: Supabase's `wrappers` extension exposes selected BigQuery Silver and
+Gold objects as foreign tables in the Supabase `public` schema. Bronze/raw
+BigQuery tables stay BigQuery-only. There are no active `_recent` or
+`*_recent_90d` compatibility views.
+
+Every caller must include the required date filter. If a Supabase FDW query
+cannot push the filter down to BigQuery and BigQuery rejects it under
+`require_partition_filter`, query through BigQuery MCP/CLI directly instead of
+reintroducing bounded-window views.
 
 Why not batch sync? See `decisions/006-supabase-fdw-over-sync.md`.
 
 ## Prereqs
 
-- Working pipeline from `setup.md` (BQ dataset `health` populated, four
-  time-series tables present, `require_partition_filter = TRUE`).
-- A Supabase project (any plan; FDW is on free tier).
-- `gcloud` configured for the GCP project.
+- Working pipeline from `setup.md` with BigQuery dataset `health` populated.
+- The BigQuery Silver/Gold views from `sql/native-ddl.sql`,
+  `sql/sleep-ddl.sql`, and the Asken repo's `sql/asken-ddl.sql`.
+- A Supabase project.
+- `gcloud` and `bq` configured for the GCP project.
 
 ## 1. Create a read-only GCP service account
 
-The FDW authenticates to BigQuery using a service account key. Don't
-reuse the Cloud Run service account — keep the FDW reader narrowly
+The FDW authenticates to BigQuery using a service account key. Keep it narrowly
 scoped.
 
 ```bash
@@ -39,8 +39,6 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --member="serviceAccount:${SA}" \
   --role="roles/bigquery.jobUser" --condition=None
 
-# Limit the data-access role to the health dataset only.
-# Use `bq update` with the JSON ACL to add a READER entry.
 TMP=$(mktemp)
 bq --project_id="$GCP_PROJECT_ID" show --format=prettyjson \
    "${GCP_PROJECT_ID}:${BQ_DATASET}" > "$TMP"
@@ -56,49 +54,23 @@ bq --project_id="$GCP_PROJECT_ID" update --source "$TMP" \
    "${GCP_PROJECT_ID}:${BQ_DATASET}"
 rm "$TMP"
 
-# Generate the JSON key — copy it; you'll paste it into Supabase Vault.
 gcloud iam service-accounts keys create ~/sa-supabase-bq.json \
   --iam-account="$SA" --project="$GCP_PROJECT_ID"
 ```
 
-`bigquery.jobUser` (project-level) lets the FDW run query jobs.
-`READER` on the dataset is what reads rows; least privilege.
+`bigquery.jobUser` lets the FDW run query jobs. Dataset-level `READER` reads
+rows.
 
-## 2. Make sure the BQ recent-90d views exist
+## 2. Enable Supabase extensions
 
-`sql/native-ddl.sql` defines four `*_recent_90d` views in the `health`
-dataset. They wrap the four time-series tables with a
-`WHERE DATE(...) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)` clause.
-BQ evaluates `CURRENT_DATE()` server-side before partition pruning, so
-the underlying `require_partition_filter` is satisfied.
+In Supabase Dashboard -> Database -> Extensions, enable:
 
-If you set up your project before these views existed, re-apply the DDL
-(it's idempotent — `CREATE OR REPLACE VIEW`):
+- `wrappers`
+- `supabase_vault`
 
-```bash
-sed "s/__PROJECT__/${GCP_PROJECT_ID}/g" sql/native-ddl.sql \
-  | bq query --project_id="$GCP_PROJECT_ID" --nouse_legacy_sql
-```
+## 3. Store the service account key in Vault
 
-Verify:
-
-```bash
-for V in heart_rate_recent_90d hrv_recent_90d raw_metrics_recent_90d workouts_recent_90d; do
-  bq query --project_id="$GCP_PROJECT_ID" --nouse_legacy_sql --format=csv --quiet \
-    "SELECT '${V}' AS v, COUNT(*) AS n FROM \`${GCP_PROJECT_ID}.health.${V}\`"
-done
-```
-
-## 3. Enable extensions in Supabase
-
-In Supabase Dashboard → **Database → Extensions**, enable:
-
-- `wrappers` (the FDW host)
-- `supabase_vault` (usually already on)
-
-## 4. Store the SA key in Vault
-
-In Supabase **SQL Editor**:
+In Supabase SQL Editor:
 
 ```sql
 SELECT vault.create_secret(
@@ -108,162 +80,123 @@ SELECT vault.create_secret(
 );
 ```
 
-Copy the returned UUID — you need it in step 5.
+Copy the returned UUID. Delete the local JSON key after it is stored in Vault.
 
-> ⚠️ Don't paste the JSON anywhere else. After this it lives encrypted
-> in Vault; treat the on-disk copy as expendable and delete it
-> (`shred -u ~/sa-supabase-bq.json` or just `rm`).
+## 4. Apply the FDW DDL
 
-## 5. Apply the FDW DDL
-
-Take `sql/supabase-fdw.sql` from this repo, replace the three
-placeholders, and paste it into Supabase SQL Editor:
+Take `sql/supabase-fdw.sql`, replace the placeholders, and paste it into
+Supabase SQL Editor:
 
 ```bash
-# Find your dataset's region (the FDW needs to know):
 LOC=$(bq --project_id="$GCP_PROJECT_ID" show --format=prettyjson \
         "${GCP_PROJECT_ID}:${BQ_DATASET}" \
       | python3 -c "import json,sys; print(json.load(sys.stdin)['location'])")
 
 sed \
   -e "s/__GCP_PROJECT_ID__/${GCP_PROJECT_ID}/g" \
-  -e "s/__SA_KEY_ID__/<the-uuid-from-step-4>/g" \
+  -e "s/__SA_KEY_ID__/<the-uuid-from-step-3>/g" \
   -e "s/__BQ_LOCATION__/${LOC}/g" \
-  sql/supabase-fdw.sql | pbcopy           # macOS — paste into the SQL editor
+  sql/supabase-fdw.sql | pbcopy
 ```
 
-The script:
-- Creates the `bigquery_wrapper` foreign-data-wrapper handler
-- Creates `bigquery_server` pointing at your dataset
-- Creates `bq_health.{heart_rate,hrv,raw_metrics,workouts}_recent`
-  foreign tables (each pointing at the matching BQ-side `*_recent_90d`
-  view)
-- Creates `public.*_recent` wrapper views — what PostgREST publishes as
-  REST endpoints
-- Grants USAGE / SELECT to the **`authenticated` role only**, and
-  explicitly revokes from `anon`
+The script rebuilds the FDW facade and grants SELECT only to the
+`authenticated` role. It explicitly revokes SELECT from `anon`.
 
-## 6. Smoke-test it
+## Exposed Tables
 
-In Supabase SQL Editor (this runs as your own DB user, so it bypasses
-the role-based grants and just exercises the FDW):
+Only BigQuery Silver/Gold objects are exposed through Supabase:
+
+| Layer | Supabase table | BigQuery object | Required filter |
+|---|---|---|---|
+| Silver | `public.raw_metrics_dedup` | `health.raw_metrics_dedup` | `DATE(ts)` |
+| Silver | `public.heart_rate_dedup` | `health.heart_rate_dedup` | `DATE(start_at)` |
+| Silver | `public.hrv_dedup` | `health.hrv_dedup` | `DATE(start_at)` |
+| Silver | `public.workouts_dedup` | `health.workouts_dedup` | `DATE(start_at)` |
+| Silver | `public.sleep_daily_sources` | `health.sleep_daily_sources` | `sleep_date` |
+| Silver | `public.asken_foods_effective` | `health.asken_foods_effective` | `date` |
+| Silver | `public.asken_meals_effective` | `health.asken_meals_effective` | `date` |
+| Gold | `public.sleep_daily` | `health.sleep_daily` | `sleep_date` |
+| Gold | `public.hrv_regression_data` | `health.hrv_regression_data` | `date` |
+| Gold | `public.hrv_regression_v2` | `health.hrv_regression_v2` | `date` |
+| Gold | `public.hrv_seg_v3` | `health.hrv_seg_v3` | `date` |
+
+## Smoke Test
+
+Use bounded queries:
 
 ```sql
-SELECT COUNT(*) FROM public.heart_rate_recent;   -- should match BQ-side count
-SELECT * FROM public.raw_metrics_recent
-  WHERE metric_name = 'step_count'
-  ORDER BY ts DESC LIMIT 5;
+SELECT COUNT(*)
+FROM public.heart_rate_dedup
+WHERE DATE(start_at) BETWEEN DATE '2026-05-10' AND DATE '2026-05-17';
+
+SELECT date, division, calories, protein_g, fat_g, carbs_g
+FROM public.asken_meals_effective
+WHERE date BETWEEN DATE '2026-05-10' AND DATE '2026-05-17'
+ORDER BY date DESC, division;
+
+SELECT sleep_date, sleep_hours, selected_source
+FROM public.sleep_daily
+WHERE sleep_date BETWEEN DATE '2026-05-10' AND DATE '2026-05-17'
+ORDER BY sleep_date DESC;
 ```
 
-Confirm anon really can't see anything:
+Confirm no bounded-window leftovers:
 
 ```sql
-SELECT grantee, privilege_type, table_name
-FROM information_schema.role_table_grants
-WHERE table_schema = 'public'
-  AND table_name LIKE '%_recent'
-ORDER BY table_name, grantee;
--- Each table should show only `authenticated` — no `anon`.
+SELECT n.nspname AS schema_name, c.relname AS object_name, c.relkind
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname LIKE '%recent%'
+ORDER BY n.nspname, c.relname;
 ```
 
-## 7. Make a Supabase Auth user (for ChatGPT to sign into)
+Expected result: no rows, except deliberately archived objects in non-runtime
+schemas if you created any manually.
 
-Supabase Dashboard → **Authentication → Users → Add user → Create new
-user**. Use your own email + a strong password. Optionally enable
-"Auto Confirm User" or confirm via the link.
+## Connector Notes
 
-This account is what ChatGPT will sign in as. The `authenticated` role
-attached to its session is what unlocks the four `_recent` views.
+Some Supabase connectors do not list foreign tables through their table
+discovery APIs. If discovery returns no tables, run SQL directly against the
+`public.*` names listed above.
 
-## 8. ChatGPT's Supabase connector
+For stateless agents, keep this prompt fragment nearby:
 
-In ChatGPT, add the Supabase connector. It will ask for either:
+```text
+Supabase exposes BigQuery Silver/Gold health tables as public foreign tables.
+Do not rely on table discovery. Query these names directly and always include
+bounded date filters:
 
-- **Email + password** (Supabase Auth login) — use the user from step 7.
-  This is the recommended path: no long-lived secret leaves Supabase.
-- **API key + project URL** — only if no login flow is offered. Use
-  the **secret key** (`sb_secret_...`) from Settings → API. **Never use
-  the publishable key here** — once we revoked anon access in step 5
-  it's harmless on its own anyway, but the secret key is the only way
-  to read.
-
-### Custom instructions (required, not optional)
-
-ChatGPT's connector enumerates `public` and reports `public tables: []`
-even when the four `_recent` views exist — its introspection skips
-foreign-backed views. You **must** name the views explicitly in the
-chat or in Custom Instructions for the connector to find them.
-
-Paste this block into ChatGPT's Custom Instructions (Settings →
-Personalization → Custom Instructions, or the GPT's system prompt):
-
-```
-私の Supabase プロジェクトに BigQuery の Apple Health データへの
-read facade があります。list_tables 系の自動探索には出てきません
-(foreign table 経由のため)。直接 SQL で叩いてください。
-
-利用可能な views (public schema, last 90 days):
-- public.heart_rate_recent  (start_at, bpm, source, ingested_at)
-- public.hrv_recent         (start_at, sdnn, source, ingested_at)
-                            -- sdnn = HRV in ms
-- public.raw_metrics_recent (metric_name, ts, value, unit, source,
-                             ingested_at)
-- public.workouts_recent    (start_at, end_at, activity_type,
-                             duration_min, total_kcal, distance_km,
-                             avg_hr, source, ingested_at)
-
-raw_metrics_recent の代表的な metric_name:
-  step_count, walking_running_distance, active_energy,
-  basal_energy_burned, weight_body_mass, body_fat_percentage,
-  resting_heart_rate, vo2_max, blood_oxygen_saturation,
-  respiratory_rate, sleep_analysis, time_in_daylight,
-  dietary_energy, protein, carbohydrates, total_fat, fiber, sodium
-
-クエリの注意:
-- timestamp は UTC。日次集計は DATE(ts AT TIME ZONE 'Asia/Tokyo') 等
-  で JST に寄せる
-- 90 日より古いデータは無い (recent view のため)
-- 書き込みは不可 (read facade)
-- 質問されたら list_tables ではなく直接 SELECT で投げる
+public.asken_foods_effective(date)
+public.asken_meals_effective(date)
+public.raw_metrics_dedup(DATE(ts))
+public.heart_rate_dedup(DATE(start_at))
+public.hrv_dedup(DATE(start_at))
+public.workouts_dedup(DATE(start_at))
+public.sleep_daily_sources(sleep_date)
+public.sleep_daily(sleep_date)
+public.hrv_regression_data(date)
+public.hrv_regression_v2(date)
+public.hrv_seg_v3(date)
 ```
 
-If the connector ever loses the hint and reports "no tables", paste a
-short reminder ("`public.hrv_recent` から SELECT して") into the chat
-and it picks back up.
+For combined Asken + Apple Health examples, use the Asken repo's
+`docs/supabase-analysis-guide.md` and `sql/supabase-golden-queries.sql`.
 
-## 9. Adjust the recent-window length
+## Cost Notes
 
-The 90-day default is a balance between scan cost and "feels live". To
-change it, edit the four BQ-side views in `sql/native-ddl.sql` and
-re-apply that block (no Supabase change needed — the foreign tables
-just see the new data through the same view name):
-
-```sql
-CREATE OR REPLACE VIEW `__PROJECT__.health.heart_rate_recent_90d` AS
-SELECT * FROM `__PROJECT__.health.heart_rate`
-WHERE DATE(start_at) >= DATE_SUB(CURRENT_DATE(), INTERVAL 180 DAY);
--- repeat for hrv / raw_metrics / workouts
-```
-
-(Keep the view names ending `_90d` even if the window changes; renaming
-would force re-issuing the foreign-table DDL.)
-
-## Cost notes
-
-Every PostgREST call triggers a BQ query against the underlying view.
-Because the view filter prunes partitions, scans stay bounded.
-A `heart_rate_recent` query over 90 days reads on the order of 5–10 MB.
-BigQuery's free tier is 1 TB/month — practically irrelevant for a
-single user, but watch it if you wire up automated dashboards.
+Every Supabase FDW query triggers a BigQuery query. Cost stays bounded only
+when callers include the required date filters. BigQuery's free tier is still
+generous for single-user health analysis, but unbounded exploratory queries are
+blocked by `require_partition_filter` and should stay blocked.
 
 ## Troubleshooting
 
-| Symptom                                                                              | Fix                                                                                |
-|--------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
-| `Cannot query over table … without a filter on partition column` from the FDW       | The Supabase view is querying the base BQ table directly. Re-apply step 5; foreign tables must point at `*_recent_90d`, not the base table |
-| `Permission denied: BigQuery`                                                        | SA missing `bigquery.jobUser` (project-level) or dataset-level READER              |
-| Foreign table returns 0 rows but BQ has data                                         | `__BQ_LOCATION__` mismatch — set it to your dataset's region (e.g. `asia-northeast1`) |
-| `permission denied for view heart_rate_recent` in ChatGPT                            | The user isn't logged into Supabase. Sign in via the connector's Auth flow         |
-| ChatGPT 401 / 404 on a freshly added view                                            | PostgREST hasn't reloaded its schema. Database → API → "Reload schema"             |
-| Want to revoke ChatGPT access immediately                                            | Authentication → Users → delete (or change password of) the connector's user       |
-| Want to rotate the GCP key                                                           | Generate a new SA key, `vault.update_secret(<id>, …)` with the new JSON, no FDW change needed |
+| Symptom | Fix |
+|---|---|
+| `Cannot query over table ... without a filter on partition column` | Add the required date filter in the query. If FDW still cannot push it down, use BigQuery MCP/CLI directly. |
+| `Permission denied: BigQuery` | The service account is missing project-level `bigquery.jobUser` or dataset-level `READER`. |
+| Foreign table returns 0 rows but BigQuery has data | Check the FDW `location` option matches the BigQuery dataset location. |
+| Supabase table discovery says `public tables: []` | Query the `public.*` foreign table names directly; some discovery APIs skip foreign tables. |
+| ChatGPT/Supabase connector gets permission errors | Sign in as a Supabase Auth user that maps to `authenticated`; `anon` is intentionally denied. |
+| Want to revoke connector access immediately | Delete or disable the Supabase Auth user used by the connector. |
+| Want to rotate the GCP key | Store a new key in Vault and re-apply `sql/supabase-fdw.sql` with the new Vault UUID. |

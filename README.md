@@ -68,6 +68,7 @@ manage_health/
 ├── hae-receiver/                       # Cloud Run service (TypeScript + Hono)
 ├── sql/native-ddl.sql                  # BigQuery table DDL (PROJECT placeholder)
 ├── sql/sleep-ddl.sql                   # 05:00-day deduped sleep views
+├── sql/supabase-fdw.sql                # Supabase FDW facade for Silver/Gold
 ├── archive/                            # earlier experiments, not part of the live pipeline
 └── README.md
 ```
