@@ -7,7 +7,7 @@
 -- representative source. Apple Watch is preferred; Pokemon Sleep is fallback.
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_daily_sources` AS
-WITH segments AS (
+WITH raw_segments AS (
   SELECT
     source,
     CASE
@@ -28,6 +28,28 @@ WITH segments AS (
     AND value IS NOT NULL
     AND value > 0
     AND value <= 14 * 3600
+),
+manual_segments AS (
+  -- Manual correction from the user's sleep note. Keep this in Silver instead
+  -- of Bronze so raw HAE payloads remain append-only source data.
+  SELECT
+    'Manual Correction' AS source,
+    0 AS source_priority,
+    DATE '2026-04-28' AS sleep_date,
+    TIMESTAMP(DATETIME '2026-04-28 00:38:00', 'Asia/Tokyo') AS segment_start,
+    TIMESTAMP(DATETIME '2026-04-28 08:24:00', 'Asia/Tokyo') AS segment_end,
+    CAST(
+      TIMESTAMP_DIFF(
+        TIMESTAMP(DATETIME '2026-04-28 08:24:00', 'Asia/Tokyo'),
+        TIMESTAMP(DATETIME '2026-04-28 00:38:00', 'Asia/Tokyo'),
+        SECOND
+      ) AS FLOAT64
+    ) AS raw_seconds
+),
+segments AS (
+  SELECT * FROM raw_segments
+  UNION ALL
+  SELECT * FROM manual_segments
 ),
 source_days AS (
   SELECT
