@@ -121,6 +121,29 @@ async function query<T extends Row = Row>(sql: string, params: Record<string, an
   return rows as T[];
 }
 
+const STREAMING_BUFFER_RETRY_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 60_000, 60_000];
+
+function isStreamingBufferError(error: unknown): boolean {
+  return /streaming buffer/i.test(error instanceof Error ? error.message : String(error));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function mutate<T extends Row = Row>(sql: string, params: Record<string, any> = {}): Promise<T[]> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await query<T>(sql, params);
+    } catch (error) {
+      const retryDelay = STREAMING_BUFFER_RETRY_DELAYS_MS[attempt];
+      if (!isStreamingBufferError(error) || retryDelay == null) throw error;
+      console.warn(`[bigquery] target is in the streaming buffer; retrying in ${retryDelay / 1000}s`);
+      await delay(retryDelay);
+    }
+  }
+}
+
 async function logRun(
   runType: string,
   status: string,
@@ -252,7 +275,7 @@ async function updateCandidateLookup(
   errorCode = '',
 ): Promise<void> {
   const storedIds = placeIds.length ? placeIds : [''];
-  await query(
+  await mutate(
     `UPDATE ${table('location_place_candidates')}
      SET google_place_ids = ARRAY(
            SELECT place_id FROM UNNEST(@place_ids) AS place_id WHERE place_id != ''
@@ -291,25 +314,14 @@ async function lookupCandidate(options: Options): Promise<void> {
   }
 
   const startedAt = nowIso();
+  let places: NearbyPlaceCandidate[];
   try {
     const key = await placesApiKey();
     const radius = Math.max(
       50,
       Math.min(200, Number(row.suggested_radius_m || 100) + Number(row.median_accuracy_m || 25)),
     );
-    const places = await searchNearbyPlaces(key, Number(row.latitude), Number(row.longitude), radius);
-    await updateCandidateLookup(candidateId, places.map((place) => place.id), places.length ? 'needs_review' : 'no_results');
-    await logRun('lookup', 'success', startedAt, {
-      candidatesScanned: 1,
-      apiCallCount: 1,
-      successCount: 1,
-    });
-    console.log(JSON.stringify({
-      candidate_id: candidateId,
-      candidates: places.map((place) => reviewResult(place, Number(row.latitude), Number(row.longitude))),
-      source: 'Google Maps',
-      note: '候補を確認してから、表示名ではなく自分用の名前でconfirmしてください。',
-    }, null, 2));
+    places = await searchNearbyPlaces(key, Number(row.latitude), Number(row.longitude), radius);
   } catch (error) {
     const code = error instanceof PlacesApiError ? error.code : 'LOOKUP_ERROR';
     await updateCandidateLookup(candidateId, [], 'lookup_failed', code).catch(() => undefined);
@@ -321,6 +333,32 @@ async function lookupCandidate(options: Options): Promise<void> {
     }).catch(() => undefined);
     throw error;
   }
+
+  try {
+    await updateCandidateLookup(candidateId, places.map((place) => place.id), places.length ? 'needs_review' : 'no_results');
+    await logRun('lookup', 'success', startedAt, {
+      candidatesScanned: 1,
+      apiCallCount: 1,
+      successCount: 1,
+    });
+  } catch (error) {
+    const code = error instanceof PlacesApiError ? error.code : 'LOOKUP_ERROR';
+    await logRun('lookup', 'save_failed', startedAt, {
+      candidatesScanned: 1,
+      apiCallCount: 1,
+      failureCount: 1,
+      errorCodes: [code],
+    }).catch(() => undefined);
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Google Places lookup succeeded, but candidate state could not be saved: ${detail}`);
+  }
+
+  console.log(JSON.stringify({
+    candidate_id: candidateId,
+    candidates: places.map((place) => reviewResult(place, Number(row.latitude), Number(row.longitude))),
+    source: 'Google Maps',
+    note: '候補を確認してから、表示名ではなく自分用の名前でconfirmしてください。',
+  }, null, 2));
 }
 
 async function confirmCandidate(options: Options): Promise<void> {
@@ -349,7 +387,7 @@ async function confirmCandidate(options: Options): Promise<void> {
     return;
   }
 
-  await query(
+  await mutate(
     `BEGIN TRANSACTION;
      INSERT INTO ${table('location_places')}
        (place_id, name, kind, latitude, longitude, radius_m, aliases, notes,
@@ -489,7 +527,7 @@ async function discover(options: Options): Promise<void> {
     const radius = Math.max(75, Math.min(200, Number(cluster.median_accuracy_m || 25) + 30));
     if (existing[0]) {
       if (!boolOption(options, 'dry-run')) {
-        await query(
+        await mutate(
           `UPDATE ${table('location_place_candidates')}
            SET centroid = ST_GEOGPOINT(@longitude, @latitude),
                suggested_radius_m = @radius_m,
@@ -517,26 +555,36 @@ async function discover(options: Options): Promise<void> {
     }
     created += 1;
     if (!boolOption(options, 'dry-run')) {
-      await bq.dataset(DATASET).table('location_place_candidates').insert([{
-        candidate_id: `candidate_${randomUUID()}`,
-        device_id: cluster.device_id,
-        centroid: `POINT(${Number(cluster.longitude)} ${Number(cluster.latitude)})`,
-        suggested_radius_m: radius,
-        sample_count: Number(cluster.sample_count),
-        active_days: Number(cluster.active_days),
-        first_seen: cluster.first_seen,
-        last_seen: cluster.last_seen,
-        median_accuracy_m: cluster.median_accuracy_m == null ? null : Number(cluster.median_accuracy_m),
-        status: 'new',
-        google_place_ids: [],
-        selected_google_place_id: null,
-        confirmed_place_id: null,
-        lookup_count: 0,
-        last_lookup_at: null,
-        last_error_code: null,
-        created_at: nowIso(),
-        updated_at: nowIso(),
-      }]);
+      const candidateId = `candidate_${randomUUID()}`;
+      const createdAt = nowIso();
+      await mutate(
+        `INSERT INTO ${table('location_place_candidates')}
+          (candidate_id, device_id, centroid, suggested_radius_m, sample_count,
+           active_days, first_seen, last_seen, median_accuracy_m, status,
+           google_place_ids, selected_google_place_id, confirmed_place_id,
+           lookup_count, last_lookup_at, last_error_code, rejection_reason,
+           created_at, updated_at)
+         VALUES
+          (@candidate_id, @device_id, ST_GEOGPOINT(@longitude, @latitude),
+           @suggested_radius_m, @sample_count, @active_days,
+           TIMESTAMP(@first_seen), TIMESTAMP(@last_seen), @median_accuracy_m,
+           'new', ARRAY<STRING>[], NULL, NULL, 0, NULL, NULL, NULL,
+           TIMESTAMP(@created_at), TIMESTAMP(@updated_at))`,
+        {
+          candidate_id: candidateId,
+          device_id: cluster.device_id,
+          longitude: Number(cluster.longitude),
+          latitude: Number(cluster.latitude),
+          suggested_radius_m: radius,
+          sample_count: Number(cluster.sample_count),
+          active_days: Number(cluster.active_days),
+          first_seen: cluster.first_seen,
+          last_seen: cluster.last_seen,
+          median_accuracy_m: cluster.median_accuracy_m == null ? null : Number(cluster.median_accuracy_m),
+          created_at: createdAt,
+          updated_at: createdAt,
+        },
+      );
     }
   }
   await logRun('discover', 'success', startedAt, {
@@ -551,7 +599,7 @@ async function rejectCandidate(options: Options): Promise<void> {
   const reason = stringOption(options, 'reason')!;
   const dryRun = boolOption(options, 'dry-run');
   if (!dryRun) {
-    await query(
+    await mutate(
       `UPDATE ${table('location_place_candidates')}
        SET status = 'rejected', rejection_reason = @reason, updated_at = CURRENT_TIMESTAMP()
        WHERE candidate_id = @candidate_id`,
@@ -565,7 +613,7 @@ async function deactivatePlace(options: Options): Promise<void> {
   const placeId = stringOption(options, 'place-id')!;
   const dryRun = boolOption(options, 'dry-run');
   if (!dryRun) {
-    await query(
+    await mutate(
       `UPDATE ${table('location_places')}
        SET active = FALSE, updated_at = CURRENT_TIMESTAMP()
        WHERE place_id = @place_id`,
@@ -596,7 +644,7 @@ async function refreshPlaceIds(options: Options): Promise<void> {
   for (const row of rows) {
     try {
       await refreshPlaceId(key, String(row.google_place_id));
-      await query(`UPDATE ${table('location_places')} SET updated_at = CURRENT_TIMESTAMP() WHERE place_id = @place_id`, { place_id: row.place_id });
+      await mutate(`UPDATE ${table('location_places')} SET updated_at = CURRENT_TIMESTAMP() WHERE place_id = @place_id`, { place_id: row.place_id });
       refreshed += 1;
     } catch (error) {
       errors.push(error instanceof PlacesApiError ? error.code : 'REFRESH_ERROR');
