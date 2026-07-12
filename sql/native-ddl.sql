@@ -169,6 +169,84 @@ SET OPTIONS (
   description = 'Bronze raw workout events. Always filter DATE(start_at) when querying directly or through Supabase.'
 );
 
+-- ===== OwnTracks location events =====
+-- OwnTracks HTTP location payloads are normalized by hae-receiver. The raw
+-- latitude/longitude columns remain available for audit; the dedup view below
+-- adds GEOGRAPHY for spatial queries without storing duplicate coordinates.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.location_events` (
+  event_id              STRING    NOT NULL,
+  captured_at           TIMESTAMP NOT NULL,
+  device_id             STRING    NOT NULL,
+  tracker_id            STRING,
+  latitude              FLOAT64   NOT NULL,
+  longitude             FLOAT64   NOT NULL,
+  accuracy_m            FLOAT64,
+  altitude_m            FLOAT64,
+  vertical_accuracy_m   FLOAT64,
+  speed_kmh             FLOAT64,
+  course_deg            FLOAT64,
+  battery_pct           INT64,
+  battery_status_code   INT64,
+  trigger               STRING,
+  connection            STRING,
+  monitoring_mode       INT64,
+  source                STRING    NOT NULL,
+  received_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY DATE(captured_at)
+CLUSTER BY device_id, source;
+
+ALTER TABLE `__PROJECT__.health.location_events`
+SET OPTIONS (
+  require_partition_filter = TRUE,
+  description = 'Bronze OwnTracks location events. Location data is sensitive; always use a bounded captured_at filter.'
+);
+
+CREATE OR REPLACE VIEW `__PROJECT__.health.location_events_dedup` AS
+WITH ranked AS (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY event_id
+      ORDER BY received_at DESC
+    ) AS _rn
+  FROM `__PROJECT__.health.location_events`
+)
+SELECT
+  * EXCEPT (_rn),
+  ST_GEOGPOINT(longitude, latitude) AS geog
+FROM ranked
+WHERE _rn = 1;
+
+ALTER VIEW `__PROJECT__.health.location_events_dedup`
+SET OPTIONS (
+  description = 'Deduplicated OwnTracks locations with GEOGRAPHY. Filter captured_at before querying.'
+);
+
+-- ===== Confirmed semantic places =====
+-- This is a small, manually confirmed place dictionary. Keep coordinates here
+-- for spatial joins; the LLM Wiki stores only semantic labels and provenance.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.location_places` (
+  place_id         STRING    NOT NULL,
+  name             STRING    NOT NULL,
+  kind             STRING,
+  latitude         FLOAT64   NOT NULL,
+  longitude        FLOAT64   NOT NULL,
+  radius_m         FLOAT64   NOT NULL,
+  aliases          ARRAY<STRING>,
+  notes            STRING,
+  confidence       STRING,
+  active           BOOL      NOT NULL,
+  last_confirmed   DATE,
+  updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+CLUSTER BY kind, active;
+
+ALTER TABLE `__PROJECT__.health.location_places`
+SET OPTIONS (
+  description = 'Manually confirmed semantic places for OwnTracks spatial joins. Do not copy coordinates into Markdown or the LLM Wiki.'
+);
+
 -- ===== Ingest log (idempotency aid for batch loads) =====
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.ingest_log` (
   source       STRING NOT NULL,   -- 'hae-receiver' | 'historical-export-xml' | ...

@@ -7,8 +7,57 @@ const {
   aggregatedSleepSession,
   canonicalSleepState,
   metricValue,
+  parseBasicAuth,
+  parseOwnTracksLocation,
   parseSleepSegment,
 } = require('./index') as typeof import('./index');
+
+test('OwnTracks Basic auth header is decoded without exposing credentials', () => {
+  assert.deepEqual(parseBasicAuth('Basic bG9jYXRpb246c2VjcmV0'), {
+    username: 'location',
+    password: 'secret',
+  });
+  assert.equal(parseBasicAuth('Bearer token'), null);
+  assert.equal(parseBasicAuth(undefined), null);
+});
+
+test('OwnTracks location payload is normalized and retry-stable', () => {
+  const payload = {
+    _type: 'location',
+    lat: 35.6812,
+    lon: 139.7671,
+    tst: 1783846800,
+    tid: 'ip',
+    acc: 12,
+    alt: 18,
+    vac: 6,
+    vel: 36,
+    cog: 90,
+    batt: 73,
+    bs: 1,
+    t: 'u',
+    conn: 'w',
+    m: 1,
+    topic: 'owntracks/personal/iphone-primary',
+  };
+
+  const first = parseOwnTracksLocation(payload, 'iphone-primary');
+  const retry = parseOwnTracksLocation(payload, 'iphone-primary');
+  assert.ok(first.row);
+  assert.deepEqual(first.row, retry.row);
+  assert.equal(first.row?.device_id, 'iphone-primary');
+  assert.equal(first.row?.captured_at, '2026-07-12T09:00:00.000Z');
+  assert.equal(first.row?.speed_kmh, 36);
+  assert.equal(first.row?.battery_pct, 73);
+  assert.equal(first.row?.source, 'owntracks');
+});
+
+test('OwnTracks location parser rejects unsupported and invalid payloads', () => {
+  assert.equal(parseOwnTracksLocation({ _type: 'transition' }).row, null);
+  assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 91, lon: 0, tst: 1 }).reason, 'invalid_latitude');
+  assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 0, lon: 0, tst: 0 }).reason, 'invalid_timestamp');
+  assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 0, lon: 0, tst: 1 }).row?.device_id, 'unknown');
+});
 
 test('aggregated sleep uses totalSleep instead of generic qty', () => {
   const point = {
