@@ -1,8 +1,9 @@
 -- BigQuery native DDL for the health dataset.
 --
--- The literal "__PROJECT__" placeholder is replaced at apply time. Run:
---   sed "s/__PROJECT__/${GCP_PROJECT_ID}/g" sql/native-ddl.sql \
---     | bq query --project_id=${GCP_PROJECT_ID} --nouse_legacy_sql
+-- The literal "__PROJECT__" placeholder is replaced at apply time. Prefer the
+-- checked-in runner, which also supports scratch datasets and dry-runs:
+--   GCP_PROJECT_ID=... scripts/apply-bigquery.sh --dry-run native
+--   GCP_PROJECT_ID=... scripts/apply-bigquery.sh native
 --
 -- Notes
 -- - CREATE IF NOT EXISTS → safe to re-run; existing data is preserved.
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS `__PROJECT__.health.raw_metrics` (
   value        FLOAT64,
   unit         STRING,              -- HAE-reported units (e.g. "kJ", "count")
   source       STRING,              -- HealthKit source (normalised, e.g. "Apple Watch")
+  sleep_kind   STRING,              -- sleep_analysis: snapshot or segment
   ingested_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 )
 PARTITION BY DATE(ts)
@@ -32,6 +34,89 @@ CLUSTER BY metric_name;
 ALTER TABLE `__PROJECT__.health.raw_metrics`
 SET OPTIONS (
   description = 'Bronze raw HAE metrics. Always filter DATE(ts) when querying directly or through Supabase.'
+);
+
+ALTER TABLE `__PROJECT__.health.raw_metrics`
+ADD COLUMN IF NOT EXISTS sleep_kind STRING;
+
+-- ===== Aggregated sleep sessions =====
+-- HAE aggregated sleep payloads carry daily totals and interval metadata that
+-- cannot be represented faithfully by the generic metric/value shape above.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.sleep_sessions` (
+  sleep_date          DATE      NOT NULL,
+  sleep_start         TIMESTAMP,
+  sleep_end           TIMESTAMP,
+  total_sleep_seconds FLOAT64   NOT NULL,
+  asleep_seconds      FLOAT64,
+  in_bed_seconds      FLOAT64,
+  in_bed_start        TIMESTAMP,
+  in_bed_end          TIMESTAMP,
+  core_seconds        FLOAT64,
+  deep_seconds        FLOAT64,
+  rem_seconds         FLOAT64,
+  awake_seconds       FLOAT64,
+  source              STRING,
+  ingested_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY sleep_date
+CLUSTER BY source;
+
+ALTER TABLE `__PROJECT__.health.sleep_sessions`
+SET OPTIONS (
+  description = 'Bronze HAE aggregated sleep sessions. total_sleep_seconds matches Apple Health time asleep; in_bed and stage fields are preserved separately.'
+);
+
+-- ===== Raw HAE sleep segments =====
+-- Category-style records are retained verbatim so interval overlap and state
+-- selection can be audited without reconstructing the original payload.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.sleep_segments` (
+  sleep_date        DATE,
+  segment_start     TIMESTAMP,
+  segment_end       TIMESTAMP,
+  state             STRING,
+  raw_state         STRING,
+  source            STRING,
+  record_id         STRING,
+  duration_seconds  FLOAT64,
+  raw_point_json    STRING,
+  ingested_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY sleep_date
+CLUSTER BY source, state;
+
+ALTER TABLE `__PROJECT__.health.sleep_segments`
+SET OPTIONS (
+  description = 'Bronze HAE sleep_analysis category segments. Includes awake/in-bed/unknown states and the original point JSON for interval audit.'
+);
+
+-- Source is a case-sensitive match token. Candidate views match it as a
+-- substring so localized Apple Watch source names use one configured row.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.sleep_source_priority` (
+  source    STRING NOT NULL,
+  priority  INT64  NOT NULL,
+  enabled   BOOL   NOT NULL,
+  PRIMARY KEY (source) NOT ENFORCED
+);
+
+MERGE `__PROJECT__.health.sleep_source_priority` AS target
+USING (
+  SELECT * FROM UNNEST([
+    STRUCT('Manual Correction' AS source, 0 AS priority, TRUE AS enabled),
+    STRUCT('Apple Watch' AS source, 1 AS priority, TRUE AS enabled),
+    STRUCT('Health' AS source, 2 AS priority, TRUE AS enabled),
+    STRUCT('AutoSleep' AS source, 3 AS priority, TRUE AS enabled),
+    STRUCT('Zepp Life' AS source, 4 AS priority, TRUE AS enabled),
+    STRUCT('Pokémon Sleep' AS source, 99 AS priority, TRUE AS enabled),
+    STRUCT('Pokemon Sleep' AS source, 99 AS priority, TRUE AS enabled)
+  ])
+) AS seed
+ON target.source = seed.source
+WHEN NOT MATCHED THEN
+  INSERT (source, priority, enabled) VALUES (seed.source, seed.priority, seed.enabled);
+
+ALTER TABLE `__PROJECT__.health.sleep_source_priority`
+SET OPTIONS (
+  description = 'Configurable sleep source priority. Values are matched as source-name tokens by sleep candidate views; lower priority wins.'
 );
 
 -- ===== HRV samples =====
@@ -118,6 +203,7 @@ WITH renamed AS (
     value AS raw_value,
     unit AS raw_unit,
     source,
+    sleep_kind,
     ingested_at
   FROM `__PROJECT__.health.raw_metrics`
   WHERE metric_name IS NOT NULL
@@ -167,6 +253,7 @@ normalized AS (
       ELSE raw_unit
     END AS unit,
     source,
+    sleep_kind,
     ingested_at
   FROM renamed
 ),
@@ -186,10 +273,10 @@ filtered AS (
     AND (metric_name != 'respiratory_rate' OR value BETWEEN 5 AND 60)
     AND (metric_name != 'sleep_analysis' OR value BETWEEN 1 AND 14 * 3600)
 )
-SELECT metric_name, ts, value, unit, source, ingested_at
+SELECT metric_name, ts, value, unit, source, sleep_kind, ingested_at
 FROM filtered
 QUALIFY ROW_NUMBER() OVER (
-  PARTITION BY metric_name, ts, FORMAT('%g', value), unit, source
+  PARTITION BY metric_name, ts, FORMAT('%g', value), unit, source, sleep_kind
   ORDER BY ingested_at DESC
 ) = 1;
 
@@ -294,6 +381,7 @@ SET OPTIONS (
 
 -- ===== Sleep normalization views =====
 -- Keep in sync with sql/sleep-ddl.sql.
--- These views assign whole sleep_analysis segments to a 05:00 JST sleep day,
--- aggregate per source, and select one representative source per day to avoid
--- double counting Apple Health / Pokemon Sleep / AutoSleep overlaps.
+-- These views assign whole sleep_analysis segments to a noon-boundary JST
+-- sleep day matching Apple Health daily display, aggregate per source, and
+-- select one representative source per day to avoid double counting Apple
+-- Health / Pokemon Sleep / AutoSleep overlaps.

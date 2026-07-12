@@ -174,6 +174,16 @@ CREATE FOREIGN TABLE public.sleep_daily (
   window_end              timestamp,
   sleep_seconds           double precision,
   sleep_hours             double precision,
+  asleep_seconds          double precision,
+  in_bed_seconds          double precision,
+  sleep_start             timestamp,
+  sleep_end               timestamp,
+  in_bed_start            timestamp,
+  in_bed_end              timestamp,
+  core_seconds            double precision,
+  deep_seconds            double precision,
+  rem_seconds             double precision,
+  awake_seconds           double precision,
   selected_source         text,
   source_priority         bigint,
   is_plausible            boolean,
@@ -181,13 +191,17 @@ CREATE FOREIGN TABLE public.sleep_daily (
   first_segment_start     timestamp,
   last_segment_end        timestamp,
   candidate_source_count  bigint,
-  candidate_sources       text
+  candidate_sources       text,
+  observed_awake_seconds  double precision,
+  unknown_seconds         double precision,
+  calculation_method      text,
+  fallback_reason         text
 )
   SERVER bigquery_server
   OPTIONS (table 'sleep_daily', location '__BQ_LOCATION__');
 
 COMMENT ON FOREIGN TABLE public.sleep_daily IS
-  'Gold BigQuery FDW table. Filter sleep_date for bounded analysis; one selected sleep source per 05:00 JST sleep day.';
+  'Gold BigQuery FDW table. Filter sleep_date for bounded analysis; one selected sleep source per Apple Health date using a noon JST boundary.';
 
 CREATE FOREIGN TABLE public.hrv_regression_data (
   date             date,
