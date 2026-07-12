@@ -9,6 +9,7 @@ const {
   metricValue,
   parseBasicAuth,
   parseOwnTracksLocation,
+  parseOwnTracksTransition,
   parseSleepSegment,
 } = require('./index') as typeof import('./index');
 
@@ -57,6 +58,43 @@ test('OwnTracks location parser rejects unsupported and invalid payloads', () =>
   assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 91, lon: 0, tst: 1 }).reason, 'invalid_latitude');
   assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 0, lon: 0, tst: 0 }).reason, 'invalid_timestamp');
   assert.equal(parseOwnTracksLocation({ _type: 'location', lat: 0, lon: 0, tst: 1 }).row?.device_id, 'unknown');
+});
+
+test('OwnTracks location parser keeps Region identifiers without trusting labels', () => {
+  const parsed = parseOwnTracksLocation({
+    _type: 'location',
+    lat: 35.6812,
+    lon: 139.7671,
+    tst: 1783846800,
+    inrids: ['office-rid', 123, '  home-rid  '],
+    inregions: ['Office', '', 'Home'],
+  });
+  assert.deepEqual(parsed.row?.in_region_ids, ['office-rid', 'home-rid']);
+  assert.deepEqual(parsed.row?.in_region_names, ['Office', 'Home']);
+});
+
+test('OwnTracks transition parser is retry-stable and validates enter/leave', () => {
+  const payload = {
+    _type: 'transition',
+    event: 'enter',
+    desc: 'Office',
+    rid: 'office-rid',
+    lat: 35.6812,
+    lon: 139.7671,
+    acc: 12,
+    tid: 'ip',
+    tst: 1783846800,
+    wtst: 1783840000,
+  };
+  const first = parseOwnTracksTransition(payload, 'iphone-primary');
+  const retry = parseOwnTracksTransition(payload, 'iphone-primary');
+  assert.ok(first.row);
+  assert.deepEqual(first.row, retry.row);
+  assert.equal(first.row?.transition_event, 'enter');
+  assert.equal(first.row?.region_id, 'office-rid');
+  assert.equal(first.row?.captured_at, '2026-07-12T09:00:00.000Z');
+  assert.equal(parseOwnTracksTransition({ ...payload, event: 'stay' }).reason, 'invalid_transition_event');
+  assert.equal(parseOwnTracksTransition({ ...payload, lon: undefined }).reason, 'partial_coordinates');
 });
 
 test('aggregated sleep uses totalSleep instead of generic qty', () => {

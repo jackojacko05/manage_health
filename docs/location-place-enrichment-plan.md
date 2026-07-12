@@ -1,6 +1,6 @@
 # Location Place Enrichment Implementation Plan
 
-Status: implementation-ready plan
+Status: core implementation complete; Google lookup awaits API key and user confirmation
 
 Owner repositories: `manage_health`, `obsidian`
 
@@ -1021,7 +1021,9 @@ Feature flag:
 DAILY_REPORT_LOCATION_EVIDENCE=0 | 1
 ```
 
-Default during rollout: `0`. Set to `1` after the seven-day validation gate.
+Default: `1`. Set to `0` to disable the optional location query while tuning
+places or validating the first Region events. The context remains non-causal
+and returns `insufficient_data` until a place is explicitly confirmed.
 
 ### Phase 7: Scheduling and monitoring
 

@@ -504,6 +504,12 @@ interface OwnTracksPayload {
   t?: unknown;
   conn?: unknown;
   m?: unknown;
+  inrids?: unknown;
+  inregions?: unknown;
+  rid?: unknown;
+  desc?: unknown;
+  event?: unknown;
+  wtst?: unknown;
   [key: string]: unknown;
 }
 
@@ -524,6 +530,24 @@ export interface ParsedOwnTracksLocation {
   trigger: string | null;
   connection: string | null;
   monitoring_mode: number | null;
+  in_region_ids: string[];
+  in_region_names: string[];
+  source: 'owntracks';
+}
+
+export interface ParsedOwnTracksTransition {
+  event_id: string;
+  captured_at: string;
+  device_id: string;
+  tracker_id: string | null;
+  region_id: string | null;
+  region_description: string | null;
+  transition_event: 'enter' | 'leave';
+  latitude: number | null;
+  longitude: number | null;
+  accuracy_m: number | null;
+  trigger: string | null;
+  waypoint_created_at: string | null;
   source: 'owntracks';
 }
 
@@ -539,6 +563,15 @@ function ownTracksString(payload: OwnTracksPayload, key: string): string | null 
   if (value == null) return null;
   const text = String(value).trim();
   return text === '' ? null : text;
+}
+
+function ownTracksStringArray(payload: OwnTracksPayload, key: string): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function ownTracksOptionalNonNegative(payload: OwnTracksPayload, key: string): number | null {
@@ -619,6 +652,78 @@ export function parseOwnTracksLocation(
       trigger: ownTracksString(payload, 't'),
       connection: ownTracksString(payload, 'conn'),
       monitoring_mode: monitoringMode != null ? Math.trunc(monitoringMode) : null,
+      in_region_ids: ownTracksStringArray(payload, 'inrids'),
+      in_region_names: ownTracksStringArray(payload, 'inregions'),
+      source: 'owntracks',
+    },
+  };
+}
+
+export function parseOwnTracksTransition(
+  value: unknown,
+  deviceHeader?: string,
+): { row: ParsedOwnTracksTransition | null; reason?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { row: null, reason: 'payload_not_object' };
+  }
+  const payload = value as OwnTracksPayload;
+  if (payload._type !== 'transition') return { row: null, reason: 'unsupported_type' };
+
+  const transitionEvent = ownTracksString(payload, 'event');
+  if (transitionEvent !== 'enter' && transitionEvent !== 'leave') {
+    return { row: null, reason: 'invalid_transition_event' };
+  }
+
+  const timestamp = ownTracksNumber(payload, 'tst');
+  if (timestamp == null || timestamp <= 0) return { row: null, reason: 'invalid_timestamp' };
+  const capturedAtDate = new Date(Math.trunc(timestamp) * 1000);
+  if (!Number.isFinite(capturedAtDate.getTime())) return { row: null, reason: 'invalid_timestamp' };
+
+  const latitude = ownTracksNumber(payload, 'lat');
+  const longitude = ownTracksNumber(payload, 'lon');
+  if ((latitude == null) !== (longitude == null)) {
+    return { row: null, reason: 'partial_coordinates' };
+  }
+  if (latitude != null && (latitude < -90 || latitude > 90)) {
+    return { row: null, reason: 'invalid_latitude' };
+  }
+  if (longitude != null && (longitude < -180 || longitude > 180)) {
+    return { row: null, reason: 'invalid_longitude' };
+  }
+
+  const trackerId = ownTracksString(payload, 'tid');
+  const deviceId = ownTracksDeviceId(payload, deviceHeader);
+  const regionId = ownTracksString(payload, 'rid');
+  const eventId = insertId([
+    'owntracks-transition-v1',
+    deviceId,
+    trackerId,
+    Math.trunc(timestamp),
+    regionId,
+    transitionEvent,
+    latitude,
+    longitude,
+  ]);
+
+  const waypointTimestamp = ownTracksNumber(payload, 'wtst');
+  const waypointCreatedAt = waypointTimestamp != null && waypointTimestamp > 0
+    ? new Date(Math.trunc(waypointTimestamp) * 1000).toISOString()
+    : null;
+
+  return {
+    row: {
+      event_id: eventId,
+      captured_at: capturedAtDate.toISOString(),
+      device_id: deviceId,
+      tracker_id: trackerId,
+      region_id: regionId,
+      region_description: ownTracksString(payload, 'desc'),
+      transition_event: transitionEvent,
+      latitude,
+      longitude,
+      accuracy_m: ownTracksOptionalNonNegative(payload, 'acc'),
+      trigger: ownTracksString(payload, 't'),
+      waypoint_created_at: waypointCreatedAt,
       source: 'owntracks',
     },
   };
@@ -668,14 +773,46 @@ app.post('/owntracks', async (c) => {
     return c.json({ error: 'invalid json' }, 400);
   }
 
-  // This receiver stores location events only. A valid non-location OwnTracks
-  // message should still be acknowledged so the app does not retry it.
-  if (
-    payload
-    && typeof payload === 'object'
-    && !Array.isArray(payload)
-    && (payload as Record<string, unknown>)._type !== 'location'
-  ) {
+  const payloadType = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)._type
+    : null;
+
+  // OwnTracks sends housekeeping and waypoint messages to the same HTTP
+  // endpoint. A valid unsupported message should be acknowledged so it is not
+  // retried, while malformed location/transition messages are rejected.
+  if (payloadType !== 'location' && payloadType !== 'transition') {
+    return c.json([]);
+  }
+
+  if (payloadType === 'transition') {
+    const parsedTransition = parseOwnTracksTransition(payload, c.req.header('x-limit-d'));
+    if (!parsedTransition.row) {
+      return c.json({ error: 'invalid transition payload', reason: parsedTransition.reason }, 400);
+    }
+
+    const row = parsedTransition.row;
+    const receivedAt = new Date().toISOString();
+    try {
+      await bq.dataset(DATASET).table('location_transitions').insert([
+        {
+          insertId: row.event_id,
+          json: { ...row, received_at: receivedAt },
+        },
+      ], { raw: true });
+    } catch (err: any) {
+      console.error('[owntracks] BQ transition insert failed', JSON.stringify({
+        message: err?.message ?? String(err),
+        name: err?.name,
+        code: err?.code,
+        event_id: row.event_id,
+      }));
+      return c.json({ error: 'bq insert failed' }, 500);
+    }
+
+    console.log('[owntracks] transition accepted', JSON.stringify({
+      event_id: row.event_id,
+      transition_event: row.transition_event,
+    }));
     return c.json([]);
   }
 
