@@ -16,6 +16,13 @@
  *   - その他の metrics                             → health.raw_metrics (long format)
  *   - workouts[]                                   → health.workouts
  *
+ * OwnTracks 仕様:
+ *   POST /owntracks
+ *     X-OwnTracks-Token: <token> (Cloud Run向け)
+ *     または Authorization: Basic <username:password>
+ *     Body: OwnTracks `_type: "location"` JSON
+ *   応答: 200 OK with [] (OwnTracks HTTP response format)
+ *
  * 冪等性: BigQuery streaming insert の insertId を使ってベストエフォート dedupe
  *   (1 時間以内の重複は BigQuery 側で排除される)
  *
@@ -60,6 +67,51 @@ async function getAuthToken(): Promise<string> {
   cachedToken = version.payload?.data?.toString() || '';
   tokenExpiresAt = now + 5 * 60_000; // 5 分キャッシュ
   return cachedToken;
+}
+
+let cachedOwnTracksPassword: string | null = null;
+let ownTracksPasswordExpiresAt = 0;
+
+async function getOwnTracksPassword(): Promise<string> {
+  const now = Date.now();
+  if (cachedOwnTracksPassword && now < ownTracksPasswordExpiresAt) {
+    return cachedOwnTracksPassword;
+  }
+
+  // ENV で直接渡せるのはローカル開発時だけ。Cloud RunではSecret Managerを使う。
+  if (process.env.OWNTRACKS_AUTH_PASSWORD) {
+    cachedOwnTracksPassword = process.env.OWNTRACKS_AUTH_PASSWORD;
+    ownTracksPasswordExpiresAt = now + 60_000;
+    return cachedOwnTracksPassword;
+  }
+
+  const name = `projects/${PROJECT_ID}/secrets/owntracks-auth-password/versions/latest`;
+  const [version] = await secrets.accessSecretVersion({ name });
+  cachedOwnTracksPassword = version.payload?.data?.toString() || '';
+  ownTracksPasswordExpiresAt = now + 5 * 60_000;
+  return cachedOwnTracksPassword;
+}
+
+export function parseBasicAuth(header: string | undefined): { username: string; password: string } | null {
+  if (!header || !/^Basic\s+/i.test(header)) return null;
+  try {
+    const encoded = header.replace(/^Basic\s+/i, '').trim();
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    const separator = decoded.indexOf(':');
+    if (separator <= 0) return null;
+    return {
+      username: decoded.slice(0, separator),
+      password: decoded.slice(separator + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function secretsEqual(left: string, right: string): boolean {
+  const leftDigest = crypto.createHash('sha256').update(left).digest();
+  const rightDigest = crypto.createHash('sha256').update(right).digest();
+  return crypto.timingSafeEqual(leftDigest, rightDigest);
 }
 
 // ---- HAE の日付フォーマットを ISO に変換 ----
@@ -435,10 +487,365 @@ interface HaePayload {
   };
 }
 
+interface OwnTracksPayload {
+  _type?: unknown;
+  lat?: unknown;
+  lon?: unknown;
+  tst?: unknown;
+  tid?: unknown;
+  topic?: unknown;
+  acc?: unknown;
+  alt?: unknown;
+  vac?: unknown;
+  vel?: unknown;
+  cog?: unknown;
+  batt?: unknown;
+  bs?: unknown;
+  t?: unknown;
+  conn?: unknown;
+  m?: unknown;
+  inrids?: unknown;
+  inregions?: unknown;
+  rid?: unknown;
+  desc?: unknown;
+  event?: unknown;
+  wtst?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ParsedOwnTracksLocation {
+  event_id: string;
+  captured_at: string;
+  device_id: string;
+  tracker_id: string | null;
+  latitude: number;
+  longitude: number;
+  accuracy_m: number | null;
+  altitude_m: number | null;
+  vertical_accuracy_m: number | null;
+  speed_kmh: number | null;
+  course_deg: number | null;
+  battery_pct: number | null;
+  battery_status_code: number | null;
+  trigger: string | null;
+  connection: string | null;
+  monitoring_mode: number | null;
+  in_region_ids: string[];
+  in_region_names: string[];
+  source: 'owntracks';
+}
+
+export interface ParsedOwnTracksTransition {
+  event_id: string;
+  captured_at: string;
+  device_id: string;
+  tracker_id: string | null;
+  region_id: string | null;
+  region_description: string | null;
+  transition_event: 'enter' | 'leave';
+  latitude: number | null;
+  longitude: number | null;
+  accuracy_m: number | null;
+  trigger: string | null;
+  waypoint_created_at: string | null;
+  source: 'owntracks';
+}
+
+function ownTracksNumber(payload: OwnTracksPayload, key: string): number | null {
+  const value = payload[key];
+  if (value == null || value === '') return null;
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function ownTracksString(payload: OwnTracksPayload, key: string): string | null {
+  const value = payload[key];
+  if (value == null) return null;
+  const text = String(value).trim();
+  return text === '' ? null : text;
+}
+
+function ownTracksStringArray(payload: OwnTracksPayload, key: string): string[] {
+  const value = payload[key];
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function ownTracksOptionalNonNegative(payload: OwnTracksPayload, key: string): number | null {
+  const value = ownTracksNumber(payload, key);
+  return value != null && value >= 0 ? value : null;
+}
+
+function ownTracksDeviceId(payload: OwnTracksPayload, deviceHeader?: string): string {
+  const headerDevice = deviceHeader?.trim();
+  if (headerDevice) return headerDevice;
+
+  const topic = ownTracksString(payload, 'topic');
+  if (topic) {
+    const parts = topic.split('/').filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
+
+  return ownTracksString(payload, 'tid') ?? 'unknown';
+}
+
+export function parseOwnTracksLocation(
+  value: unknown,
+  deviceHeader?: string,
+): { row: ParsedOwnTracksLocation | null; reason?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { row: null, reason: 'payload_not_object' };
+  }
+  const payload = value as OwnTracksPayload;
+  if (payload._type !== 'location') return { row: null, reason: 'unsupported_type' };
+
+  const latitude = ownTracksNumber(payload, 'lat');
+  const longitude = ownTracksNumber(payload, 'lon');
+  if (latitude == null || latitude < -90 || latitude > 90) {
+    return { row: null, reason: 'invalid_latitude' };
+  }
+  if (longitude == null || longitude < -180 || longitude > 180) {
+    return { row: null, reason: 'invalid_longitude' };
+  }
+
+  const timestamp = ownTracksNumber(payload, 'tst');
+  if (timestamp == null || timestamp <= 0) return { row: null, reason: 'invalid_timestamp' };
+  const capturedAtDate = new Date(Math.trunc(timestamp) * 1000);
+  if (!Number.isFinite(capturedAtDate.getTime())) return { row: null, reason: 'invalid_timestamp' };
+
+  const trackerId = ownTracksString(payload, 'tid');
+  const deviceId = ownTracksDeviceId(payload, deviceHeader);
+  const eventId = insertId([
+    'owntracks-location-v1',
+    deviceId,
+    trackerId,
+    Math.trunc(timestamp),
+    latitude,
+    longitude,
+  ]);
+
+  const battery = ownTracksNumber(payload, 'batt');
+  const batteryPct = battery != null && battery >= 0 && battery <= 100 ? Math.trunc(battery) : null;
+  const monitoringMode = ownTracksNumber(payload, 'm');
+
+  return {
+    row: {
+      event_id: eventId,
+      captured_at: capturedAtDate.toISOString(),
+      device_id: deviceId,
+      tracker_id: trackerId,
+      latitude,
+      longitude,
+      accuracy_m: ownTracksOptionalNonNegative(payload, 'acc'),
+      altitude_m: ownTracksNumber(payload, 'alt'),
+      vertical_accuracy_m: ownTracksOptionalNonNegative(payload, 'vac'),
+      speed_kmh: ownTracksOptionalNonNegative(payload, 'vel'),
+      course_deg: ownTracksOptionalNonNegative(payload, 'cog'),
+      battery_pct: batteryPct,
+      battery_status_code: (() => {
+        const status = ownTracksNumber(payload, 'bs');
+        return status != null ? Math.trunc(status) : null;
+      })(),
+      trigger: ownTracksString(payload, 't'),
+      connection: ownTracksString(payload, 'conn'),
+      monitoring_mode: monitoringMode != null ? Math.trunc(monitoringMode) : null,
+      in_region_ids: ownTracksStringArray(payload, 'inrids'),
+      in_region_names: ownTracksStringArray(payload, 'inregions'),
+      source: 'owntracks',
+    },
+  };
+}
+
+export function parseOwnTracksTransition(
+  value: unknown,
+  deviceHeader?: string,
+): { row: ParsedOwnTracksTransition | null; reason?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { row: null, reason: 'payload_not_object' };
+  }
+  const payload = value as OwnTracksPayload;
+  if (payload._type !== 'transition') return { row: null, reason: 'unsupported_type' };
+
+  const transitionEvent = ownTracksString(payload, 'event');
+  if (transitionEvent !== 'enter' && transitionEvent !== 'leave') {
+    return { row: null, reason: 'invalid_transition_event' };
+  }
+
+  const timestamp = ownTracksNumber(payload, 'tst');
+  if (timestamp == null || timestamp <= 0) return { row: null, reason: 'invalid_timestamp' };
+  const capturedAtDate = new Date(Math.trunc(timestamp) * 1000);
+  if (!Number.isFinite(capturedAtDate.getTime())) return { row: null, reason: 'invalid_timestamp' };
+
+  const latitude = ownTracksNumber(payload, 'lat');
+  const longitude = ownTracksNumber(payload, 'lon');
+  if ((latitude == null) !== (longitude == null)) {
+    return { row: null, reason: 'partial_coordinates' };
+  }
+  if (latitude != null && (latitude < -90 || latitude > 90)) {
+    return { row: null, reason: 'invalid_latitude' };
+  }
+  if (longitude != null && (longitude < -180 || longitude > 180)) {
+    return { row: null, reason: 'invalid_longitude' };
+  }
+
+  const trackerId = ownTracksString(payload, 'tid');
+  const deviceId = ownTracksDeviceId(payload, deviceHeader);
+  const regionId = ownTracksString(payload, 'rid');
+  const eventId = insertId([
+    'owntracks-transition-v1',
+    deviceId,
+    trackerId,
+    Math.trunc(timestamp),
+    regionId,
+    transitionEvent,
+    latitude,
+    longitude,
+  ]);
+
+  const waypointTimestamp = ownTracksNumber(payload, 'wtst');
+  const waypointCreatedAt = waypointTimestamp != null && waypointTimestamp > 0
+    ? new Date(Math.trunc(waypointTimestamp) * 1000).toISOString()
+    : null;
+
+  return {
+    row: {
+      event_id: eventId,
+      captured_at: capturedAtDate.toISOString(),
+      device_id: deviceId,
+      tracker_id: trackerId,
+      region_id: regionId,
+      region_description: ownTracksString(payload, 'desc'),
+      transition_event: transitionEvent,
+      latitude,
+      longitude,
+      accuracy_m: ownTracksOptionalNonNegative(payload, 'acc'),
+      trigger: ownTracksString(payload, 't'),
+      waypoint_created_at: waypointCreatedAt,
+      source: 'owntracks',
+    },
+  };
+}
+
 // ---- Hono app ----
 const app = new Hono();
 
 app.get('/', (c) => c.text('hae-receiver ok'));
+
+app.post('/owntracks', async (c) => {
+  const credentials = parseBasicAuth(c.req.header('authorization'));
+  const expectedUsername = process.env.OWNTRACKS_AUTH_USERNAME || 'location';
+  const clientToken = c.req.header('x-owntracks-token');
+
+  let expectedPassword: string;
+  try {
+    expectedPassword = await getOwnTracksPassword();
+  } catch (err) {
+    console.error('[owntracks] auth secret unavailable', err instanceof Error ? err.message : String(err));
+    return c.json({ error: 'service unavailable' }, 503);
+  }
+  if (!expectedPassword) {
+    console.error('[owntracks] auth secret is empty');
+    return c.json({ error: 'service unavailable' }, 503);
+  }
+
+  if (
+    (!clientToken && !credentials)
+    || (clientToken
+      ? !secretsEqual(clientToken, expectedPassword)
+      : credentials?.username !== expectedUsername
+        || !secretsEqual(credentials?.password ?? '', expectedPassword))
+  ) {
+    c.header('WWW-Authenticate', 'Basic realm="owntracks"');
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+
+  const body = await c.req.text();
+  // OwnTracks can POST an empty message for non-location housekeeping events.
+  if (!body.trim()) return c.json([]);
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return c.json({ error: 'invalid json' }, 400);
+  }
+
+  const payloadType = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)._type
+    : null;
+
+  // OwnTracks sends housekeeping and waypoint messages to the same HTTP
+  // endpoint. A valid unsupported message should be acknowledged so it is not
+  // retried, while malformed location/transition messages are rejected.
+  if (payloadType !== 'location' && payloadType !== 'transition') {
+    return c.json([]);
+  }
+
+  if (payloadType === 'transition') {
+    const parsedTransition = parseOwnTracksTransition(payload, c.req.header('x-limit-d'));
+    if (!parsedTransition.row) {
+      return c.json({ error: 'invalid transition payload', reason: parsedTransition.reason }, 400);
+    }
+
+    const row = parsedTransition.row;
+    const receivedAt = new Date().toISOString();
+    try {
+      await bq.dataset(DATASET).table('location_transitions').insert([
+        {
+          insertId: row.event_id,
+          json: { ...row, received_at: receivedAt },
+        },
+      ], { raw: true });
+    } catch (err: any) {
+      console.error('[owntracks] BQ transition insert failed', JSON.stringify({
+        message: err?.message ?? String(err),
+        name: err?.name,
+        code: err?.code,
+        event_id: row.event_id,
+      }));
+      return c.json({ error: 'bq insert failed' }, 500);
+    }
+
+    console.log('[owntracks] transition accepted', JSON.stringify({
+      event_id: row.event_id,
+      transition_event: row.transition_event,
+    }));
+    return c.json([]);
+  }
+
+  const parsed = parseOwnTracksLocation(payload, c.req.header('x-limit-d'));
+  if (!parsed.row) {
+    return c.json({ error: 'invalid location payload', reason: parsed.reason }, 400);
+  }
+
+  const row = parsed.row;
+  const receivedAt = new Date().toISOString();
+  try {
+    await bq.dataset(DATASET).table('location_events').insert([
+      {
+        insertId: row.event_id,
+        json: { ...row, received_at: receivedAt },
+      },
+    ], { raw: true });
+  } catch (err: any) {
+    // Do not log the payload or coordinates: location data is sensitive.
+    console.error('[owntracks] BQ insert failed', JSON.stringify({
+      message: err?.message ?? String(err),
+      name: err?.name,
+      code: err?.code,
+      event_id: row.event_id,
+    }));
+    return c.json({ error: 'bq insert failed' }, 500);
+  }
+
+  console.log('[owntracks] location accepted', JSON.stringify({
+    event_id: row.event_id,
+  }));
+  return c.json([]);
+});
 
 app.post('/', async (c) => {
   // Auth

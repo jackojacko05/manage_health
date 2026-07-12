@@ -10,7 +10,9 @@
     "diff-check": "git diff --check",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "deploy": "bash deploy.sh"
+    "deploy": "bash deploy.sh",
+    "location:admin": "node dist/location-place-admin.js",
+    "location:discover": "node dist/location-place-admin.js discover"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^7.9.0",

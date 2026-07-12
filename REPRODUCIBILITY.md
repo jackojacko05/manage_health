@@ -25,7 +25,8 @@ scripts/apply-bigquery.sh all
 ```
 
 The commands are idempotent for tables and views. `all` applies native tables,
-sleep views, and the synthetic assertions in that order.
+including `location_events`, then sleep views and the synthetic assertions in
+that order.
 
 ## Reproduce a sleep result
 
@@ -71,13 +72,52 @@ results there before considering any production change. The GCS backup does not
 contain an iPhone/HAE configuration; that configuration remains documented in
 `.claude/skills/health-pipeline/references/hae-pro-config.md`.
 
+OwnTracks configuration is documented in `docs/owntracks-location.md`. The
+OwnTracks password remains in Secret Manager and is never part of a backup or
+the repository.
+
+Location enrichment DDL and semantic assertions are applied separately when
+needed:
+
+```bash
+GCP_PROJECT_ID=your-project-id BQ_DATASET=health \
+  scripts/apply-bigquery.sh location
+
+GCP_PROJECT_ID=your-project-id BQ_DATASET=health \
+  scripts/apply-bigquery.sh location-assert
+```
+
+The Google Places key is stored in Secret Manager under
+`google-maps-places-api-key`. The admin CLI performs nearby searches only on
+explicit candidate review; it stores Place IDs and the user's own semantic
+label, not Google display content. Grant the deployed receiver service account
+access without putting the key in Git:
+
+```bash
+export RUNTIME_SERVICE_ACCOUNT="$(gcloud run services describe hae-receiver \
+  --project="$GCP_PROJECT_ID" \
+  --region="$GCP_REGION" \
+  --format='value(spec.template.spec.serviceAccountName)')"
+
+gcloud secrets add-iam-policy-binding google-maps-places-api-key \
+  --project="$GCP_PROJECT_ID" \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role=roles/secretmanager.secretAccessor
+```
+
 ## Files that define the pipeline
 
 - `sql/native-ddl.sql`: base tables and generic Silver views
 - `sql/sleep-ddl.sql`: sleep source priority, interval union, and Gold views
 - `sql/sleep-candidate-assertions.sql`: side-effect-free SQL assertions
 - `sql/queries/sleep-week.sql`: bounded, parameterized sleep audit
+- `sql/queries/location-place-candidates.sql`: bounded frequent-place candidates
+- `sql/queries/location-place-visits.sql`: bounded visits to confirmed places
+- `sql/location-ddl.sql`: location transition, candidate, and semantic context DDL
+- `sql/location-assertions.sql`: synthetic location rule assertions
+- `hae-receiver/src/location-place-admin.ts`: explicit candidate review/confirmation CLI
 - `scripts/apply-bigquery.sh`: deterministic DDL runner
 - `scripts/backup-health-to-gcs.sh`: explicit bounded GCS export
 - `scripts/restore-health-from-gcs.sh`: scratch-dataset restore
 - `hae-receiver/deploy.sh`: Cloud Run deployment
+- `docs/owntracks-location.md`: OwnTracks HTTP configuration and verification

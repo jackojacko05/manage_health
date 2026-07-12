@@ -13,9 +13,9 @@ fi
 
 action=${1:-}
 case "$action" in
-  native|sleep|assert|all) ;;
+  native|location|location-assert|sleep|assert|all) ;;
   *)
-    echo "Usage: GCP_PROJECT_ID=... [BQ_DATASET=health] [BQ_LOCATION=...] $0 [--dry-run] native|sleep|assert|all" >&2
+    echo "Usage: GCP_PROJECT_ID=... [BQ_DATASET=health] [BQ_LOCATION=...] $0 [--dry-run] native|location|location-assert|sleep|assert|all" >&2
     exit 2
     ;;
 esac
@@ -30,16 +30,27 @@ run_sleep() {
   run_sql_file "$REPO_ROOT/sql/sleep-ddl.sql" "$dry_run"
 }
 
+run_location() {
+  run_sql_file "$REPO_ROOT/sql/location-ddl.sql" "$dry_run"
+}
+
+run_location_assert() {
+  run_sql_file "$REPO_ROOT/sql/location-assertions.sql" "$dry_run"
+}
+
 run_assert() {
   run_sql_file "$REPO_ROOT/sql/sleep-candidate-assertions.sql" "$dry_run"
 }
 
 case "$action" in
   native) run_native ;;
+  location) run_location ;;
+  location-assert) run_location_assert ;;
   sleep) run_sleep ;;
   assert) run_assert ;;
   all)
     run_native
+    run_location
     run_sleep
     run_assert
     ;;
