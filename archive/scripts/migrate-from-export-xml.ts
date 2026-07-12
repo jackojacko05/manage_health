@@ -176,6 +176,23 @@ function shortSource(s?: string): string | null {
   return s.slice(0, 40);
 }
 
+function isSleepAsleepState(value?: string): boolean {
+  // Apple Health sleep categories. The daily "time asleep" total is the sum of
+  // asleep states only; InBed and Awake are separate display totals.
+  const v = String(value ?? '').trim().toLowerCase().replace(/[_-]+/g, '');
+  return [
+    'hkcategoryvaluesleepanalysisasleep',
+    'hkcategoryvaluesleepanalysisasleepunspecified',
+    'hkcategoryvaluesleepanalysisasleepcore',
+    'hkcategoryvaluesleepanalysisasleepdeep',
+    'hkcategoryvaluesleepanalysisasleeprem',
+    '1',
+    '3',
+    '4',
+    '5',
+  ].includes(v);
+}
+
 // ------ 書き出し用 WriteStream ------
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const streams = {
@@ -253,8 +270,25 @@ parser.on('opentag', (node: any) => {
 
     const metric = metricName(type);
 
-    // CategoryType の value は文字列（例: sleep state "HKCategoryValueSleepAnalysisInBed"）
-    // 数値化できない場合は sleep は duration (sec) に変換、他はスキップ
+    if (type === 'HKCategoryTypeIdentifierSleepAnalysis') {
+      const endIso = toIso(a.endDate);
+      if (!endIso || !isSleepAsleepState(valueStr)) return;
+      const value = (new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000;
+      if (!Number.isFinite(value) || value <= 0) return;
+      emit('raw_metrics', {
+        metric_name: metric,
+        ts: startIso,
+        value,
+        unit: 's',
+        source,
+        sleep_kind: 'segment',
+      });
+      counters.raw++;
+      return;
+    }
+
+    // CategoryType の value は文字列。数値化できない場合は duration (sec)
+    // に変換する。睡眠は上で asleep states だけをセグメント保存する。
     let value: number;
     const numericVal = Number(valueStr);
     if (Number.isFinite(numericVal)) {

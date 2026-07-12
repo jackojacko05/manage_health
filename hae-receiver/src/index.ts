@@ -11,6 +11,8 @@
  * 振り分け:
  *   - metrics[].name === "heart_rate"             → health.heart_rate (start_at=date, bpm=qty)
  *   - metrics[].name === "heart_rate_variability" → health.hrv       (start_at=date, sdnn=qty)
+ *   - sleep_analysis (segments)                    → health.sleep_segments + raw_metrics compatibility row
+ *   - sleep_analysis (aggregated)                  → health.sleep_sessions + raw_metrics compatibility row
  *   - その他の metrics                             → health.raw_metrics (long format)
  *   - workouts[]                                   → health.workouts
  *
@@ -62,7 +64,7 @@ async function getAuthToken(): Promise<string> {
 
 // ---- HAE の日付フォーマットを ISO に変換 ----
 // HAE: "2025-04-01 09:30:00 +0900" → "2025-04-01T09:30:00+09:00"
-function toIso(hkDate: string): string | null {
+export function toIso(hkDate: string): string | null {
   if (!hkDate) return null;
   const m = hkDate.match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-])(\d{2})(\d{2})$/);
   if (!m) {
@@ -71,6 +73,15 @@ function toIso(hkDate: string): string | null {
     return null;
   }
   return `${m[1]}T${m[2]}${m[3]}${m[4]}:${m[5]}`;
+}
+
+function toIsoFlexible(value: any): string | null {
+  if (value == null) return null;
+  const text = String(value);
+  const direct = toIso(text);
+  if (direct) return direct;
+  const parsed = new Date(text);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
 function insertId(parts: (string | number | undefined | null)[]): string {
@@ -105,14 +116,14 @@ function firstMeasurement(...values: any[]): { value: number; unit?: string } | 
 }
 
 function unitLower(unit?: string): string {
-  return (unit ?? '').toLowerCase();
+  return (unit ?? '').toLowerCase().replace(/\s+/g, '');
 }
 
 function secondsFromMeasurement(measurement: { value: number; unit?: string }): number {
   const unit = unitLower(measurement.unit);
-  if (unit === 's' || unit === 'sec' || unit === 'second' || unit === 'seconds') return measurement.value;
-  if (unit === 'hr' || unit === 'hour' || unit === 'hours') return measurement.value * 3600;
-  if (unit === 'min' || unit === 'minute' || unit === 'minutes') return measurement.value * 60;
+  if (['s', 'sec', 'secs', 'second', 'seconds'].includes(unit)) return measurement.value;
+  if (['h', 'hr', 'hrs', 'hour', 'hours'].includes(unit)) return measurement.value * 3600;
+  if (['m', 'min', 'mins', 'minute', 'minutes'].includes(unit)) return measurement.value * 60;
   return measurement.value;
 }
 
@@ -122,6 +133,188 @@ function sleepSecondsFromMeasurement(measurement: { value: number; unit?: string
   if (measurement.value <= 24) return measurement.value * 3600;
   if (measurement.value <= 24 * 60) return measurement.value * 60;
   return measurement.value;
+}
+
+function optionalSleepSeconds(value: any, fallbackUnit: string): number | null {
+  const measurement = unwrapMeasurement(value);
+  if (!measurement) return null;
+  const seconds = sleepSecondsFromMeasurement(measurement, fallbackUnit);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+function jstSleepDate(iso: string): string | null {
+  const shifted = new Date(new Date(iso).getTime() + 12 * 60 * 60 * 1000);
+  if (!Number.isFinite(shifted.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(shifted);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  if (!values.year || !values.month || !values.day) return null;
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function sleepDate(pt: HaePoint, sleepStartIso: string | null, sleepEndIso: string | null): string | null {
+  // Apple Health's sleep day is the noon-to-noon window containing sleepStart.
+  // HAE can report the export/request date instead of the session's date.
+  const start = sleepStartIso ?? toIso(pt.inBedStart ?? '');
+  if (start) return jstSleepDate(start);
+
+  const explicit = String(pt.date ?? '').match(/^(\d{4}-\d{2}-\d{2})/);
+  if (explicit) return explicit[1];
+  return sleepEndIso ? jstSleepDate(sleepEndIso) : null;
+}
+
+function normalizedSleepState(value: any): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^hkcategoryvaluesleepanalysis/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+export type SleepSegmentState = 'awake' | 'sleep' | 'inbed' | 'unknown';
+
+function rawSleepState(pt: HaePoint): any {
+  for (const key of ['state', 'sleepState', 'sleep_state', 'sleepStage', 'sleep_stage', 'stage', 'category', 'value', 'type']) {
+    if (pt[key] != null) return pt[key];
+  }
+  return null;
+}
+
+export function canonicalSleepState(value: any): SleepSegmentState {
+  const normalized = normalizedSleepState(value);
+  const compact = normalized.replace(/\s/g, '');
+  if (normalized === 'awake' || compact === 'awake' || normalized === '2' || normalized === '起きている') return 'awake';
+  if (normalized === 'in bed' || compact === 'inbed' || normalized === '0' || normalized === 'ベッドに入る') return 'inbed';
+  if (['1', '3', '4', '5'].includes(normalized)
+    || normalized.includes('asleep')
+    || normalized.includes('core')
+    || normalized.includes('deep')
+    || normalized.includes('rem')
+    || ['コア', '深い', 'レム'].includes(normalized)
+    || normalized === 'sleep') return 'sleep';
+  return 'unknown';
+}
+
+function sleepSource(pt: HaePoint): string | null {
+  return pt.source ?? pt.sourceName ?? pt.metadata?.source ?? pt.metadata?.sourceName ?? null;
+}
+
+function sleepRecordId(pt: HaePoint, fallback: string): string {
+  const explicit = pt.id ?? pt.uuid ?? pt.identifier ?? pt.snapshotId ?? pt.recordId ?? pt.sessionId;
+  return explicit == null || String(explicit).trim() === '' ? fallback : String(explicit);
+}
+
+function sleepInterval(pt: HaePoint): { start: string | null; end: string | null } {
+  return {
+    start: toIsoFlexible(pt.startDate ?? pt.start ?? pt.sleepStart ?? pt.inBedStart ?? pt.date ?? pt.from ?? pt.begin ?? pt.start_at),
+    end: toIsoFlexible(pt.endDate ?? pt.end ?? pt.sleepEnd ?? pt.inBedEnd ?? pt.to ?? pt.finish ?? pt.stop),
+  };
+}
+
+function serializedRawState(value: any): string | null {
+  if (value == null) return null;
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+    ? String(value)
+    : JSON.stringify(value);
+}
+
+export interface ParsedSleepSegment {
+  sleep_date: string;
+  segment_start: string;
+  segment_end: string;
+  state: SleepSegmentState;
+  raw_state: string | null;
+  source: string | null;
+  record_id: string;
+  duration_seconds: number;
+  raw_point_json: string;
+}
+
+export function parseSleepSegment(pt: HaePoint): { row: ParsedSleepSegment | null; reason?: string } {
+  const stateValue = rawSleepState(pt);
+  const { start, end } = sleepInterval(pt);
+  if (stateValue == null) return { row: null, reason: 'missing_state' };
+  if (!start || !end) return { row: null, reason: 'missing_start_or_end' };
+  const duration = (new Date(end).getTime() - new Date(start).getTime()) / 1000;
+  if (!Number.isFinite(duration) || duration <= 0) return { row: null, reason: 'non_positive_or_invalid_duration' };
+  if (duration > 24 * 3600) return { row: null, reason: 'duration_over_24h' };
+  const sleepDate = jstSleepDate(start);
+  if (!sleepDate) return { row: null, reason: 'invalid_sleep_date' };
+  const state = canonicalSleepState(stateValue);
+  const rawState = serializedRawState(stateValue);
+  const source = sleepSource(pt);
+  const fallbackId = [start, end, rawState, source].map((part) => part ?? '').join('|');
+  return {
+    row: {
+      sleep_date: sleepDate,
+      segment_start: start,
+      segment_end: end,
+      state,
+      raw_state: rawState,
+      source,
+      record_id: sleepRecordId(pt, fallbackId),
+      duration_seconds: duration,
+      raw_point_json: JSON.stringify(pt),
+    },
+  };
+}
+
+function isExcludedSleepState(value: any): boolean {
+  const state = normalizedSleepState(value);
+  const compact = state.replace(/\s/g, '');
+  return state === 'awake'
+    || state === 'in bed'
+    || compact === 'inbed'
+    || state === '0' // HKCategoryValueSleepAnalysisInBed
+    || state === '2'; // HKCategoryValueSleepAnalysisAwake
+}
+
+function sleepKind(pt: HaePoint): 'snapshot' | 'segment' {
+  return [
+    pt.totalSleep,
+    pt.asleep,
+    pt.inBed,
+    pt.inBedStart,
+    pt.inBedEnd,
+    pt.core,
+    pt.deep,
+    pt.rem,
+    pt.awake,
+  ].some((value) => value != null)
+    ? 'snapshot'
+    : 'segment';
+}
+
+export function aggregatedSleepSession(unit: string, pt: HaePoint): Record<string, any> | null {
+  const totalSleep = optionalSleepSeconds(pt.totalSleep, unit)
+    ?? optionalSleepSeconds(pt.asleep, unit);
+  if (totalSleep == null || totalSleep <= 0) return null;
+
+  const sleepStart = toIso(pt.sleepStart ?? '');
+  const sleepEnd = toIso(pt.sleepEnd ?? '');
+  const date = sleepDate(pt, sleepStart, sleepEnd);
+  if (!date) return null;
+
+  return {
+    sleep_date: date,
+    sleep_start: sleepStart,
+    sleep_end: sleepEnd,
+    total_sleep_seconds: totalSleep,
+    asleep_seconds: optionalSleepSeconds(pt.asleep, unit),
+    in_bed_seconds: optionalSleepSeconds(pt.inBed, unit),
+    in_bed_start: toIso(pt.inBedStart ?? ''),
+    in_bed_end: toIso(pt.inBedEnd ?? ''),
+    core_seconds: optionalSleepSeconds(pt.core, unit),
+    deep_seconds: optionalSleepSeconds(pt.deep, unit),
+    rem_seconds: optionalSleepSeconds(pt.rem, unit),
+    awake_seconds: optionalSleepSeconds(pt.awake, unit),
+    source: sleepSource(pt),
+  };
 }
 
 function kcalFromMeasurement(measurement: { value: number; unit?: string } | null): number | null {
@@ -138,7 +331,23 @@ function kmFromMeasurement(measurement: { value: number; unit?: string } | null)
   return measurement.value;
 }
 
-function metricValue(name: string, unit: string, pt: HaePoint, iso: string): number | null {
+export function metricValue(name: string, unit: string, pt: HaePoint, iso: string): number | null {
+  if (name === 'sleep_analysis') {
+    const totalSleep = firstMeasurement(pt.totalSleep, pt.asleep);
+    if (totalSleep) return sleepSecondsFromMeasurement(totalSleep, unit);
+
+    if (isExcludedSleepState(pt.value)) return null;
+
+    const segment = firstMeasurement(pt.qty, pt.duration);
+    if (segment) return sleepSecondsFromMeasurement(segment, unit);
+
+    const endIso = toIso(pt.end ?? pt.endDate ?? pt.finish ?? pt.to ?? pt.sleepEnd ?? '');
+    if (!endIso) return null;
+
+    const seconds = (new Date(endIso).getTime() - new Date(iso).getTime()) / 1000;
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+
   const direct = firstMeasurement(
     pt.qty,
     pt.value,
@@ -152,31 +361,23 @@ function metricValue(name: string, unit: string, pt: HaePoint, iso: string): num
     pt.average,
     pt.duration,
   );
-  if (name === 'sleep_analysis') {
-    if (direct) return sleepSecondsFromMeasurement(direct, unit);
-
-    const endIso = toIso(pt.end ?? pt.endDate ?? pt.finish ?? pt.to ?? pt.sleepEnd ?? pt.inBedEnd ?? '');
-    if (!endIso) return null;
-
-    const seconds = (new Date(endIso).getTime() - new Date(iso).getTime()) / 1000;
-    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
-  }
-
   return direct?.value ?? null;
 }
 
 function metricIso(name: string, pt: HaePoint): string | null {
   if (name === 'sleep_analysis') {
-    return toIso(pt.sleepStart ?? pt.inBedStart ?? pt.date ?? '');
+    return toIsoFlexible(pt.sleepStart ?? pt.inBedStart ?? pt.startDate ?? pt.start ?? pt.date ?? '');
   }
-  return toIso(pt.date);
+  return toIsoFlexible(pt.date);
 }
 
 // ---- Payload の型定義 (HAE JSON) ----
 interface HaePoint {
-  date: string;
-  end?: string;
+  date?: string;
+  startDate?: string;
   endDate?: string;
+  start?: string;
+  end?: string;
   finish?: string;
   to?: string;
   sleepStart?: string;
@@ -186,8 +387,20 @@ interface HaePoint {
   totalSleep?: any;
   asleep?: any;
   inBed?: any;
+  core?: any;
+  deep?: any;
+  rem?: any;
+  awake?: any;
   qty?: number;
   source?: string;
+  sourceName?: string;
+  metadata?: { source?: string; sourceName?: string; [k: string]: any };
+  id?: string | number;
+  uuid?: string;
+  identifier?: string;
+  snapshotId?: string;
+  recordId?: string;
+  sessionId?: string;
   // HRV や HR に複数 fields がある場合、qty 以外の数値フィールド
   [k: string]: any;
 }
@@ -252,6 +465,8 @@ app.post('/', async (c) => {
     heart_rate: [],
     hrv: [],
     raw_metrics: [],
+    sleep_segments: [],
+    sleep_sessions: [],
     workouts: [],
   };
 
@@ -280,17 +495,69 @@ app.post('/', async (c) => {
           json: { start_at: iso, sdnn: Number(sdnn), source: pt.source ?? null, ingested_at: ingestedAt },
         });
       } else {
+        const currentSleepKind = name === 'sleep_analysis' ? sleepKind(pt) : null;
+        if (name === 'sleep_analysis') {
+          const hasTotalSleep = Object.prototype.hasOwnProperty.call(pt, 'totalSleep') && pt.totalSleep != null;
+          const segmentCandidate = parseSleepSegment(pt);
+          // Segment rows are checked before snapshots so HAE category records with
+          // interval + state are never mistaken for an aggregate snapshot.
+          if (segmentCandidate.row && !hasTotalSleep) {
+            const segment = segmentCandidate.row;
+            rowsByTable.sleep_segments.push({
+              insertId: insertId(['sleep-segment-v1', segment.record_id]),
+              json: { ...segment, ingested_at: ingestedAt },
+            });
+          } else if (!segmentCandidate.row && segmentCandidate.reason && !hasTotalSleep) {
+            console.warn('[hae-receiver] sleep segment dropped', JSON.stringify({
+              reason: segmentCandidate.reason,
+              keys: Object.keys(pt).sort(),
+              source: sleepSource(pt),
+              raw_state: serializedRawState(rawSleepState(pt)),
+            }));
+          }
+          const session = aggregatedSleepSession(unit, pt);
+          if (session) {
+            rowsByTable.sleep_sessions.push({
+              insertId: insertId([
+                'sleep-session-v1',
+                sleepRecordId(pt, [session.sleep_date, session.sleep_start, session.sleep_end, session.source].join('|')),
+                session.sleep_date,
+                session.source,
+                session.sleep_start,
+                session.sleep_end,
+                session.total_sleep_seconds,
+                session.asleep_seconds,
+                session.in_bed_seconds,
+                session.core_seconds,
+                session.deep_seconds,
+                session.rem_seconds,
+                session.awake_seconds,
+              ]),
+              json: { ...session, ingested_at: ingestedAt },
+            });
+          }
+        }
+
         // 汎用 metric を long 形式で格納
         const value = metricValue(name, unit, pt, iso);
         if (value == null) continue;
         rowsByTable.raw_metrics.push({
-          insertId: insertId(['raw', name, iso, pt.source]),
+          insertId: insertId([
+            'raw',
+            name,
+            pt.id ?? pt.uuid ?? pt.identifier ?? pt.snapshotId ?? pt.recordId ?? pt.sessionId,
+            iso,
+            value,
+            currentSleepKind,
+            pt.source,
+          ]),
           json: {
             metric_name: name,
             ts: iso,
             value: Number(value),
             unit: name === 'sleep_analysis' ? 's' : unit,
             source: pt.source ?? null,
+            sleep_kind: currentSleepKind,
             ingested_at: ingestedAt,
           },
         });
@@ -395,6 +662,8 @@ app.post('/', async (c) => {
   return c.json({ ok: true, inserted: summary });
 });
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
-  console.log(`[hae-receiver] listening on :${info.port}`);
-});
+if (require.main === module) {
+  serve({ fetch: app.fetch, port: PORT }, (info) => {
+    console.log(`[hae-receiver] listening on :${info.port}`);
+  });
+}
