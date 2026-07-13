@@ -100,3 +100,78 @@ ASSERT (
   SELECT COUNT(*) = 1
   FROM deduped
 ) AS 'semantic dedup must collapse normalized source variants';
+
+ASSERT (
+  WITH segment_days AS (
+    SELECT * FROM UNNEST([
+      STRUCT(DATE '2099-01-01' AS sleep_date, 224.0 AS asleep_seconds),
+      STRUCT(DATE '2099-01-02', 5 * 3600.0)
+    ])
+  ), structured_winners AS (
+    SELECT * FROM UNNEST([
+      STRUCT(DATE '2099-01-01' AS sleep_date, 5 * 3600.0 AS sleep_seconds),
+      STRUCT(DATE '2099-01-02', 6 * 3600.0)
+    ])
+  ), segment_candidates AS (
+    SELECT sleep_date, asleep_seconds AS sleep_seconds, 'segments_atomic' AS calculation_method
+    FROM segment_days
+    WHERE asleep_seconds BETWEEN 1 * 3600 AND 14 * 3600
+  ), structured_fallback AS (
+    SELECT sleep_date, sleep_seconds, 'structured_fallback' AS calculation_method
+    FROM structured_winners g
+    WHERE NOT EXISTS (
+      SELECT 1 FROM segment_candidates s WHERE s.sleep_date = g.sleep_date
+    )
+  ), candidates AS (
+    SELECT * FROM segment_candidates
+    UNION ALL
+    SELECT * FROM structured_fallback
+  )
+  SELECT
+    COUNT(*) = 2
+    AND COUNTIF(
+      sleep_date = DATE '2099-01-01'
+      AND sleep_seconds = 5 * 3600
+      AND calculation_method = 'structured_fallback'
+    ) = 1
+    AND COUNTIF(
+      sleep_date = DATE '2099-01-02'
+      AND sleep_seconds = 5 * 3600
+      AND calculation_method = 'segments_atomic'
+    ) = 1
+  FROM candidates
+) AS 'implausible atomic sleep must fall back while plausible atomic sleep wins';
+
+ASSERT (
+  WITH snapshots AS (
+    SELECT * FROM UNNEST([
+      STRUCT(
+        DATE '2099-01-03' AS sleep_date,
+        'Apple Watch' AS source,
+        18141.0 AS total_sleep_seconds,
+        TIMESTAMP('2099-01-03 01:30:00+00') AS ingested_at
+      ),
+      STRUCT(
+        DATE '2099-01-03',
+        'Apple Watch',
+        13899.0,
+        TIMESTAMP('2099-01-03 02:50:00+00')
+      ),
+      STRUCT(
+        DATE '2099-01-03',
+        'Apple Watch',
+        12064.0,
+        TIMESTAMP('2099-01-03 13:46:00+00')
+      )
+    ])
+  ), winner AS (
+    SELECT *
+    FROM snapshots
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY sleep_date, source
+      ORDER BY total_sleep_seconds DESC, ingested_at DESC
+    ) = 1
+  )
+  SELECT total_sleep_seconds = 18141.0
+  FROM winner
+) AS 'later incremental HAE snapshots must not truncate a complete night';

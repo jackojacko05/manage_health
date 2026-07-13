@@ -27,12 +27,16 @@ WHERE sleep_date BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
   AND total_sleep_seconds BETWEEN 1 AND 14 * 3600
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY sleep_date, source
-  ORDER BY ingested_at DESC NULLS LAST, sleep_start DESC NULLS LAST, total_sleep_seconds DESC
+  -- Health Auto Export may send incremental payloads for the same night.
+  -- A later payload can therefore be a partial snapshot, not a correction.
+  -- Keep the widest plausible aggregate and use ingestion time only to break
+  -- ties between equally complete snapshots.
+  ORDER BY total_sleep_seconds DESC, ingested_at DESC NULLS LAST, sleep_start ASC NULLS LAST
 ) = 1;
 
 ALTER VIEW `__PROJECT__.health.sleep_sessions_dedup`
 SET OPTIONS (
-  description = 'Silver daily HAE sleep sessions. Keeps the latest aggregated snapshot per Health date and source so later corrections, including lower totals, win.'
+  description = 'Silver daily HAE sleep sessions. Keeps the widest plausible aggregate per Health date and source because later incremental HAE payloads can contain only a partial night.'
 );
 
 CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_daily_sources` AS
@@ -108,7 +112,7 @@ raw_snapshot_ranked AS (
     *,
     ROW_NUMBER() OVER (
       PARTITION BY sleep_date, source
-      ORDER BY ingested_at DESC NULLS LAST, segment_start DESC, raw_seconds DESC
+      ORDER BY raw_seconds DESC, ingested_at DESC NULLS LAST, segment_start ASC
     ) AS rn
   FROM raw_candidates
   WHERE segment_kind = 'snapshot'
@@ -207,7 +211,7 @@ FROM source_days;
 
 ALTER VIEW `__PROJECT__.health.sleep_daily_sources`
 SET OPTIONS (
-  description = 'Silver sleep source-day normalization. Structured HAE snapshots are preferred by sleep_date independent of source; raw stage segments are summed, while raw snapshots use the latest snapshot. Gold detail columns preserve in-bed and sleep-stage summaries.'
+  description = 'Silver sleep source-day normalization. Structured HAE snapshots are preferred by sleep_date independent of source; raw stage segments are summed, while raw snapshots keep the widest plausible aggregate so later incremental payloads cannot truncate a night. Gold detail columns preserve in-bed and sleep-stage summaries.'
 );
 
 -- Independent structured winner. Candidate fallback and Gold compatibility both
@@ -477,7 +481,11 @@ WITH atomic AS (
   FROM segment_days d
   JOIN segment_source_counts s USING (sleep_date)
   LEFT JOIN structured_winners g USING (sleep_date)
-  WHERE d.asleep_seconds > 0
+  -- A partial/stale category fragment must not override a complete structured
+  -- HAE snapshot for the same sleep day.  Apply the same plausibility window
+  -- used by Gold so an implausible atomic result falls through to the
+  -- structured winner below.
+  WHERE d.asleep_seconds BETWEEN 1 * 3600 AND 14 * 3600
 ), structured_fallback AS (
   SELECT
     g.sleep_date,
@@ -502,7 +510,7 @@ WITH atomic AS (
     g.last_segment_end,
     g.candidate_source_count,
     'structured_fallback' AS calculation_method,
-    'no_valid_sleep_segments' AS fallback_reason
+    'no_plausible_sleep_segments' AS fallback_reason
   FROM `__PROJECT__.health.sleep_daily_structured` g
   WHERE NOT EXISTS (
     SELECT 1 FROM segment_candidates s WHERE s.sleep_date = g.sleep_date
