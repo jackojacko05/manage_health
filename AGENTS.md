@@ -30,6 +30,8 @@ invalid values are filtered at the Bronze -> Silver boundary.
 | Silver | `heart_rate_dedup` | Deduped heart-rate sample | `DATE(start_at)` |
 | Silver | `hrv_dedup` | Deduped HRV sample | `DATE(start_at)` |
 | Silver | `workouts_dedup` | Deduped workout event | `DATE(start_at)` |
+| Silver | `location_events_dedup` | Deduped OwnTracks sample | `DATE(captured_at)` |
+| Silver | `location_transitions_dedup` | Deduped OwnTracks transition | `DATE(captured_at)` |
 | Silver | `sleep_daily_sources` | Sleep day + source | `sleep_date` |
 | Silver | `asken_foods_effective` | Deduped Asken food item | `date` |
 | Silver | `asken_meals_effective` | Meal summary with snack remainder | `date` |
@@ -42,6 +44,12 @@ invalid values are filtered at the Bronze -> Silver boundary.
 
 BigQuery time-series tables use `require_partition_filter = TRUE`. Always put
 the partition predicate inside the base CTE before joining.
+
+The two windowed location views contain a practical all-history partition
+guard internally because BigQuery cannot push the caller predicate through
+their `ROW_NUMBER()` operation. Callers must still add a narrow
+`DATE(captured_at)` range; BigQuery combines it with the internal guard for
+partition pruning. This is not a rolling-window compatibility view.
 
 ```sql
 SELECT DATE(ts, 'Asia/Tokyo') AS jst_date, SUM(value) AS steps
