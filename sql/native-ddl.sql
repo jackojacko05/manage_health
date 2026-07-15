@@ -211,6 +211,10 @@ WITH ranked AS (
       ORDER BY received_at DESC
     ) AS _rn
   FROM `__PROJECT__.health.location_events`
+  -- A partition predicate must be present inside the view because BigQuery
+  -- does not push the caller's predicate through this window function. The
+  -- practical all-history guard still lets a narrower caller filter prune.
+  WHERE DATE(captured_at) BETWEEN DATE '1900-01-01' AND DATE '9999-12-31'
 )
 SELECT
   * EXCEPT (_rn),
@@ -220,7 +224,7 @@ WHERE _rn = 1;
 
 ALTER VIEW `__PROJECT__.health.location_events_dedup`
 SET OPTIONS (
-  description = 'Deduplicated OwnTracks locations with GEOGRAPHY. Filter captured_at before querying.'
+  description = 'Deduplicated all-history OwnTracks locations with GEOGRAPHY. Always add a bounded captured_at filter; the view includes an internal all-history partition guard so BigQuery can enforce and prune the Bronze table.'
 );
 
 -- ===== Confirmed semantic places =====

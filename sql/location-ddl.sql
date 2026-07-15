@@ -46,12 +46,16 @@ FROM (
       ORDER BY received_at DESC
     ) AS _rn
   FROM `__PROJECT__.health.location_transitions` AS t
+  -- BigQuery requires the partition predicate inside the windowed view. This
+  -- practical all-history guard remains compatible with narrower caller-side
+  -- captured_at filters and does not create a rolling-window view.
+  WHERE DATE(t.captured_at) BETWEEN DATE '1900-01-01' AND DATE '9999-12-31'
 )
 WHERE _rn = 1;
 
 ALTER VIEW `__PROJECT__.health.location_transitions_dedup`
 SET OPTIONS (
-  description = 'Deduplicated OwnTracks Region transitions. Filter captured_at before querying.'
+  description = 'Deduplicated all-history OwnTracks Region transitions. Always add a bounded captured_at filter; the view includes an internal all-history partition guard so BigQuery can enforce and prune the Bronze table.'
 );
 
 -- ===== Confirmed semantic place metadata =====
