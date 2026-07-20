@@ -28,6 +28,14 @@ else
   report_ok "public scope documents exist"
 fi
 
+if [[ ! -f PRIVATE_MIGRATION.md || ! -f private-extension-manifest.json ]]; then
+  report_blocker "private extension migration boundary is missing"
+elif ! python3 scripts/validate_private_extension_manifest.py >/dev/null; then
+  report_blocker "private extension migration manifest is invalid"
+else
+  report_ok "private extension migration boundary is valid"
+fi
+
 # These are personal extensions or generated state. They may exist during the
 # migration, but they must not be silently counted as public core.
 private_paths=(
