@@ -1,0 +1,38 @@
+name: public-boundary
+
+on:
+  push:
+    paths:
+      - "hae-receiver/**"
+      - "sql/**"
+      - "tests/**"
+      - ".github/workflows/public-boundary.yml"
+  pull_request:
+    paths:
+      - "hae-receiver/**"
+      - "sql/**"
+      - "tests/**"
+      - ".github/workflows/public-boundary.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate SQL contracts
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: hae-receiver/package-lock.json
+      - name: Test public receiver
+        run: npm ci --prefix hae-receiver && npm test --prefix hae-receiver
+      - name: Check patch whitespace
+        run: git diff --check
