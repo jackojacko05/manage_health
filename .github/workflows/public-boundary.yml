@@ -3,12 +3,22 @@ name: public-boundary
 on:
   push:
     paths:
+      - "PUBLIC_SCOPE.md"
+      - "PRIVATE_MIGRATION.md"
+      - "COMPATIBILITY.md"
+      - "private-extension-manifest.json"
+      - "scripts/**"
       - "hae-receiver/**"
       - "sql/**"
       - "tests/**"
       - ".github/workflows/public-boundary.yml"
   pull_request:
     paths:
+      - "PUBLIC_SCOPE.md"
+      - "PRIVATE_MIGRATION.md"
+      - "COMPATIBILITY.md"
+      - "private-extension-manifest.json"
+      - "scripts/**"
       - "hae-receiver/**"
       - "sql/**"
       - "tests/**"
@@ -22,6 +32,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate private boundary manifest
+        run: python3 scripts/validate_private_extension_manifest.py
+      - name: Test private boundary manifest validator
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Check public release script
+        run: bash -n scripts/verify-public-release.sh && bash scripts/verify-public-release.sh --report
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
