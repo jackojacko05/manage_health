@@ -1,0 +1,46 @@
+name: public-boundary
+
+on:
+  push:
+    paths:
+      - "PUBLIC_SCOPE.md"
+      - "PRIVATE_MIGRATION.md"
+      - "COMPATIBILITY.md"
+      - "private-extension-manifest.json"
+      - "scripts/**"
+      - "hae-receiver/**"
+      - ".github/workflows/public-boundary.yml"
+  pull_request:
+    paths:
+      - "PUBLIC_SCOPE.md"
+      - "PRIVATE_MIGRATION.md"
+      - "COMPATIBILITY.md"
+      - "private-extension-manifest.json"
+      - "scripts/**"
+      - "hae-receiver/**"
+      - ".github/workflows/public-boundary.yml"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: hae-receiver/package-lock.json
+      - name: Validate private boundary manifest
+        run: python3 scripts/validate_private_extension_manifest.py
+      - name: Check shell syntax
+        run: bash -n scripts/verify-public-release.sh
+      - name: Run public release report
+        run: bash scripts/verify-public-release.sh --report
+      - name: Install receiver dependencies
+        run: npm ci
+        working-directory: hae-receiver
+      - name: Test receiver
+        run: npm test
+        working-directory: hae-receiver
+      - name: Check patch whitespace
+        run: git diff --check
