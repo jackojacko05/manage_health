@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "public_repository": "jackojacko05/manage_health",
+  "private_target_repository": "personal-health-platform",
+  "migration_status": "prepare_only",
+  "entries": [
+    {
+      "id": "location-route",
+      "source_repo": "manage_health",
+      "source_paths": ["hae-receiver/src/index.ts"],
+      "private_symbols": [
+        "getOwnTracksPassword",
+        "parseOwnTracksLocation",
+        "parseOwnTracksTransition",
+        "app.post('/owntracks')"
+      ],
+      "destination": "private location receiver service",
+      "action": "split_before_public_release",
+      "verification": "synthetic OwnTracks location and transition fixtures"
+    },
+    {
+      "id": "google-places",
+      "source_repo": "manage_health",
+      "source_paths": [
+        "hae-receiver/src/google-places.ts",
+        "hae-receiver/src/location-place-admin.ts",
+        "scripts/deploy-location-place-discovery.sh",
+        "sql/location-ddl.sql",
+        "sql/location-assertions.sql",
+        "sql/queries/location-place-candidates.sql",
+        "sql/queries/location-place-visits.sql"
+      ],
+      "private_symbols": ["Google Places admin/discovery", "location place dictionary"],
+      "destination": "private location enrichment module",
+      "action": "move_after_private_target_exists",
+      "verification": "fixture-only place candidate and confirmation tests"
+    },
+    {
+      "id": "asken",
+      "source_repo": "asken-sync",
+      "source_paths": [],
+      "private_symbols": ["meal record sync"],
+      "destination": "personal-health-platform/asken",
+      "action": "keep_private_and_integrate",
+      "verification": "dry-run diff with no raw payload output"
+    },
+    {
+      "id": "fatigue",
+      "source_repo": "manage_fatigue",
+      "source_paths": [],
+      "private_symbols": ["fatigue calculation and personal context"],
+      "destination": "personal-health-platform/fatigue",
+      "action": "keep_private_and_integrate",
+      "verification": "bounded fixture test and no health export commit"
+    }
+  ]
+}
