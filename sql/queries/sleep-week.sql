@@ -11,7 +11,9 @@ WITH daily AS (
     sleep_start,
     sleep_end,
     selected_source,
-    candidate_sources
+    candidate_sources,
+    calculation_method,
+    fallback_reason
   FROM `__PROJECT__.__DATASET__.sleep_daily`
   WHERE sleep_date BETWEEN @start_date AND @end_date
 ), result_rows AS (
@@ -26,7 +28,9 @@ WITH daily AS (
     sleep_start,
     sleep_end,
     selected_source,
-    candidate_sources
+    candidate_sources,
+    calculation_method,
+    fallback_reason
   FROM daily
 
   UNION ALL
@@ -42,7 +46,9 @@ WITH daily AS (
     CAST(NULL AS TIMESTAMP) AS sleep_start,
     CAST(NULL AS TIMESTAMP) AS sleep_end,
     CAST(NULL AS STRING) AS selected_source,
-    STRING_AGG(DISTINCT candidate_sources, ' | ') AS candidate_sources
+    STRING_AGG(DISTINCT candidate_sources, ' | ') AS candidate_sources,
+    CAST(NULL AS STRING) AS calculation_method,
+    CAST(NULL AS STRING) AS fallback_reason
   FROM daily
 )
 SELECT *

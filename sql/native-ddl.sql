@@ -89,6 +89,27 @@ SET OPTIONS (
   description = 'Bronze HAE sleep_analysis category segments. Includes awake/in-bed/unknown states and the original point JSON for interval audit.'
 );
 
+-- ===== Private sleep corrections =====
+-- Keep correction values in BigQuery rather than checking personal sleep data
+-- into Git. Rows are append-only; the latest valid row per sleep_date wins in
+-- sleep_manual_corrections_dedup.
+CREATE TABLE IF NOT EXISTS `__PROJECT__.health.sleep_manual_corrections` (
+  sleep_date       DATE      NOT NULL,
+  sleep_seconds    FLOAT64   NOT NULL,
+  sleep_start      TIMESTAMP NOT NULL,
+  sleep_end        TIMESTAMP NOT NULL,
+  in_bed_seconds   FLOAT64,
+  awake_seconds    FLOAT64,
+  reason           STRING,
+  corrected_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP() NOT NULL
+)
+CLUSTER BY sleep_date;
+
+ALTER TABLE `__PROJECT__.health.sleep_manual_corrections`
+SET OPTIONS (
+  description = 'Private append-only sleep corrections reconciled against Apple Health. Values are never seeded from Git; the latest valid row per date wins.'
+);
+
 -- Source is a case-sensitive match token. Candidate views match it as a
 -- substring so localized Apple Watch source names use one configured row.
 CREATE TABLE IF NOT EXISTS `__PROJECT__.health.sleep_source_priority` (

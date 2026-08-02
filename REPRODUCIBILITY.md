@@ -40,6 +40,12 @@ scripts/query-sleep-week.sh 2026-07-05 2026-07-11
 The source of truth remains exact seconds. The query applies `CEIL(AVG(seconds) /
 60)` only to the display columns, after averaging the bounded rows.
 
+When an HAE snapshot is clipped and Apple Health is the authoritative source,
+append the reconciled interval to the private BigQuery table
+`health.sleep_manual_corrections`. The latest valid row per `sleep_date` wins.
+Never seed or check personal correction values into Git; the bounded private GCS
+backup includes this table for scratch-dataset reproduction.
+
 ## Snapshot BigQuery to GCS
 
 GCS is an explicit backup destination, not an automatic second copy of personal

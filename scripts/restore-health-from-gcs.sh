@@ -17,7 +17,7 @@ require_cli
 bq mk --project_id="$PROJECT_ID" --location="$LOCATION" --dataset \
   "${PROJECT_ID}:${RESTORE_DATASET}" >/dev/null 2>&1 || true
 
-for table in raw_metrics sleep_sessions sleep_segments heart_rate hrv workouts sleep_source_priority ingest_log; do
+for table in raw_metrics sleep_sessions sleep_segments sleep_manual_corrections heart_rate hrv workouts sleep_source_priority ingest_log; do
   echo "[restore] ${table}" >&2
   bq load \
     --project_id="$PROJECT_ID" \
