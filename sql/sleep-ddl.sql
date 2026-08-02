@@ -39,6 +39,34 @@ SET OPTIONS (
   description = 'Silver daily HAE sleep sessions. Keeps the widest plausible aggregate per Health date and source because later incremental HAE payloads can contain only a partial night.'
 );
 
+CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_manual_corrections_dedup` AS
+SELECT
+  sleep_date,
+  sleep_seconds,
+  sleep_start,
+  sleep_end,
+  COALESCE(
+    in_bed_seconds,
+    CAST(TIMESTAMP_DIFF(sleep_end, sleep_start, MICROSECOND) AS FLOAT64) / 1000000
+  ) AS in_bed_seconds,
+  COALESCE(awake_seconds, 0) AS awake_seconds,
+  reason,
+  corrected_at
+FROM `__PROJECT__.health.sleep_manual_corrections`
+WHERE sleep_date BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
+  AND sleep_seconds BETWEEN 1 * 3600 AND 14 * 3600
+  AND sleep_end > sleep_start
+  AND sleep_seconds <= CAST(TIMESTAMP_DIFF(sleep_end, sleep_start, MICROSECOND) AS FLOAT64) / 1000000
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY sleep_date
+  ORDER BY corrected_at DESC, sleep_seconds DESC, sleep_start
+) = 1;
+
+ALTER VIEW `__PROJECT__.health.sleep_manual_corrections_dedup`
+SET OPTIONS (
+  description = 'Latest valid private Apple Health reconciliation per sleep date. Personal correction values live only in BigQuery and are not seeded from Git.'
+);
+
 CREATE OR REPLACE VIEW `__PROJECT__.health.sleep_daily_sources` AS
 WITH structured_segments AS (
   SELECT
@@ -138,33 +166,29 @@ raw_without_structured AS (
   )
 ),
 manual_segments AS (
-  -- Manual correction from the user's sleep note. Keep this in Silver instead
-  -- of Bronze so raw HAE payloads remain append-only source data.
+  -- Corrections remain separate from append-only HAE source data. Values are
+  -- private BigQuery rows rather than personal sleep records checked into Git.
   SELECT
     'Manual Correction' AS source,
     0 AS source_priority,
-    DATE '2026-04-28' AS sleep_date,
-    CAST(NULL AS TIMESTAMP) AS sleep_start,
-    CAST(NULL AS TIMESTAMP) AS sleep_end,
-    TIMESTAMP(DATETIME '2026-04-28 00:38:00', 'Asia/Tokyo') AS segment_start,
-    TIMESTAMP(DATETIME '2026-04-28 08:24:00', 'Asia/Tokyo') AS segment_end,
-    CAST(
-      TIMESTAMP_DIFF(
-        TIMESTAMP(DATETIME '2026-04-28 08:24:00', 'Asia/Tokyo'),
-        TIMESTAMP(DATETIME '2026-04-28 00:38:00', 'Asia/Tokyo'),
-        SECOND
-      ) AS FLOAT64
-    ) AS raw_seconds,
-    CAST(NULL AS FLOAT64) AS asleep_seconds,
-    CAST(NULL AS FLOAT64) AS in_bed_seconds,
-    CAST(NULL AS TIMESTAMP) AS in_bed_start,
-    CAST(NULL AS TIMESTAMP) AS in_bed_end,
+    sleep_date,
+    sleep_start,
+    sleep_end,
+    sleep_start AS segment_start,
+    sleep_end AS segment_end,
+    sleep_seconds AS raw_seconds,
+    sleep_seconds AS asleep_seconds,
+    in_bed_seconds,
+    sleep_start AS in_bed_start,
+    sleep_end AS in_bed_end,
     CAST(NULL AS FLOAT64) AS core_seconds,
     CAST(NULL AS FLOAT64) AS deep_seconds,
     CAST(NULL AS FLOAT64) AS rem_seconds,
-    CAST(NULL AS FLOAT64) AS awake_seconds,
-    'segment' AS segment_kind,
-    CAST(NULL AS TIMESTAMP) AS ingested_at
+    awake_seconds,
+    'manual_correction' AS segment_kind,
+    corrected_at AS ingested_at
+  FROM `__PROJECT__.health.sleep_manual_corrections_dedup`
+  WHERE sleep_date BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
 ),
 segments AS (
   SELECT * FROM structured_segments
@@ -453,6 +477,33 @@ WITH atomic AS (
   SELECT *
   FROM `__PROJECT__.health.sleep_daily_structured`
   WHERE sleep_date BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
+), manual_candidates AS (
+  SELECT
+    sleep_date,
+    sleep_start,
+    sleep_end,
+    sleep_seconds,
+    sleep_seconds AS asleep_seconds,
+    in_bed_seconds,
+    awake_seconds,
+    awake_seconds AS observed_awake_seconds,
+    sleep_start AS in_bed_start,
+    sleep_end AS in_bed_end,
+    CAST(NULL AS FLOAT64) AS core_seconds,
+    CAST(NULL AS FLOAT64) AS deep_seconds,
+    CAST(NULL AS FLOAT64) AS rem_seconds,
+    'Manual Correction' AS selected_source,
+    'Manual Correction' AS selected_sources,
+    1 AS segment_count,
+    0 AS unknown_segment_count,
+    0.0 AS unknown_seconds,
+    sleep_start AS first_segment_start,
+    sleep_end AS last_segment_end,
+    1 AS candidate_source_count,
+    'manual_correction' AS calculation_method,
+    reason AS fallback_reason
+  FROM `__PROJECT__.health.sleep_manual_corrections_dedup`
+  WHERE sleep_date BETWEEN DATE '1900-01-01' AND DATE '2100-01-01'
 ), segment_candidates AS (
   SELECT
     d.sleep_date,
@@ -486,6 +537,9 @@ WITH atomic AS (
   -- used by Gold so an implausible atomic result falls through to the
   -- structured winner below.
   WHERE d.asleep_seconds BETWEEN 1 * 3600 AND 14 * 3600
+    AND NOT EXISTS (
+      SELECT 1 FROM manual_candidates m WHERE m.sleep_date = d.sleep_date
+    )
 ), structured_fallback AS (
   SELECT
     g.sleep_date,
@@ -515,14 +569,19 @@ WITH atomic AS (
   WHERE NOT EXISTS (
     SELECT 1 FROM segment_candidates s WHERE s.sleep_date = g.sleep_date
   )
+    AND NOT EXISTS (
+      SELECT 1 FROM manual_candidates m WHERE m.sleep_date = g.sleep_date
+    )
 )
+SELECT * FROM manual_candidates
+UNION ALL
 SELECT * FROM segment_candidates
 UNION ALL
 SELECT * FROM structured_fallback;
 
 ALTER VIEW `__PROJECT__.health.sleep_daily_candidate`
 SET OPTIONS (
-  description = 'Validation Gold candidate. Uses atomic HAE segments when present and falls back to independent sleep_daily_structured with explicit calculation_method/fallback_reason. Exact seconds are retained; Apple-compatible display uses CEIL(AVG(seconds)/60) at query time.'
+  description = 'Validation Gold candidate. Private Apple Health reconciliations win first, otherwise atomic HAE segments are used with structured fallback. Exact seconds and calculation diagnostics are retained.'
 );
 
 -- Candidate passed the bounded audit. Keep the established Gold column contract

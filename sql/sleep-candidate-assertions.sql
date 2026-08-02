@@ -175,3 +175,43 @@ ASSERT (
   SELECT total_sleep_seconds = 18141.0
   FROM winner
 ) AS 'later incremental HAE snapshots must not truncate a complete night';
+
+ASSERT (
+  WITH manual_candidates AS (
+    SELECT * FROM UNNEST([
+      STRUCT(DATE '2099-01-04' AS sleep_date, 8 * 3600.0 AS sleep_seconds, 'manual_correction' AS calculation_method)
+    ])
+  ), segment_candidates AS (
+    SELECT * FROM UNNEST([
+      STRUCT(DATE '2099-01-04' AS sleep_date, 5 * 3600.0 AS sleep_seconds, 'segments_atomic' AS calculation_method),
+      STRUCT(DATE '2099-01-05', 6 * 3600.0, 'segments_atomic')
+    ]) s
+    WHERE NOT EXISTS (
+      SELECT 1 FROM manual_candidates m WHERE m.sleep_date = s.sleep_date
+    )
+  ), structured_fallback AS (
+    SELECT * FROM UNNEST([
+      STRUCT(DATE '2099-01-04' AS sleep_date, 4 * 3600.0 AS sleep_seconds, 'structured_fallback' AS calculation_method)
+    ]) g
+    WHERE NOT EXISTS (
+      SELECT 1 FROM segment_candidates s WHERE s.sleep_date = g.sleep_date
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM manual_candidates m WHERE m.sleep_date = g.sleep_date
+      )
+  ), candidates AS (
+    SELECT * FROM manual_candidates
+    UNION ALL
+    SELECT * FROM segment_candidates
+    UNION ALL
+    SELECT * FROM structured_fallback
+  )
+  SELECT
+    COUNTIF(sleep_date = DATE '2099-01-04') = 1
+    AND COUNTIF(
+      sleep_date = DATE '2099-01-04'
+      AND sleep_seconds = 8 * 3600
+      AND calculation_method = 'manual_correction'
+    ) = 1
+  FROM candidates
+) AS 'manual correction must suppress segment and structured candidates for the same date';

@@ -38,6 +38,7 @@ export_table() {
 export_table raw_metrics "DATE(ts) BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
 export_table sleep_sessions "sleep_date BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
 export_table sleep_segments "sleep_date BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
+export_table sleep_manual_corrections "sleep_date BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
 export_table heart_rate "DATE(start_at) BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
 export_table hrv "DATE(start_at) BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
 export_table workouts "DATE(start_at) BETWEEN DATE '${START_DATE}' AND DATE '${END_DATE}'"
